@@ -1,11 +1,15 @@
+use std::io::Read;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use brotli::Decompressor;
+use flate2::read::{GzDecoder, ZlibDecoder};
 use http_body_util::{BodyExt, Full};
 use hudsucker::hyper::{HeaderMap, Request, Response, StatusCode, Uri};
 use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
 use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::cli::OutputMode;
@@ -15,6 +19,7 @@ pub struct CaptureConfig {
     pub output_mode: OutputMode,
     pub filters: Filters,
     pub body_preview_bytes: usize,
+    pub show_connect: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +51,14 @@ impl Filters {
 
         method_matches && host_matches && url_matches
     }
+
+    pub fn matches_connect(&self, host: &str) -> bool {
+        self.host_contains.is_empty()
+            || self
+                .host_contains
+                .iter()
+                .any(|candidate| host.contains(candidate))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +81,10 @@ impl CaptureHandler {
 impl HttpHandler for CaptureHandler {
     async fn should_intercept(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
         let host = host_from_headers(req.headers(), req.uri());
+        if req.method().as_str().eq_ignore_ascii_case("CONNECT") {
+            return self.config.filters.matches_connect(&host);
+        }
+
         let url = request_url(req.headers(), req.uri(), Some("https"));
         self.config
             .filters
@@ -81,7 +98,9 @@ impl HttpHandler for CaptureHandler {
     ) -> RequestOrResponse {
         match capture_request(req, &self.config).await {
             Ok((req, Some(pending))) => {
-                self.printer.print_request(&pending.request).await;
+                if should_print_request(&pending.request, &self.config) {
+                    self.printer.print_request(&pending.request).await;
+                }
                 self.pending_request = Some(pending);
                 RequestOrResponse::Request(req)
             }
@@ -102,9 +121,11 @@ impl HttpHandler for CaptureHandler {
 
         match capture_response(res, &pending, &self.config).await {
             Ok((res, response)) => {
-                self.printer
-                    .print_response(&pending.request, &response)
-                    .await;
+                if should_print_response(&pending.request, &response, &self.config) {
+                    self.printer
+                        .print_response(&pending.request, &response)
+                        .await;
+                }
                 res
             }
             Err(error) => {
@@ -133,8 +154,6 @@ async fn capture_request(
         .await
         .context("failed collecting request body")?;
     let bytes = collected.to_bytes();
-    let preview = body_preview(&parts.headers, &bytes, config.body_preview_bytes);
-    let headers = serialize_headers(&parts.headers);
 
     let captured = CapturedRequest {
         timestamp_ms: now_ms(),
@@ -142,8 +161,10 @@ async fn capture_request(
         url,
         host,
         version: format!("{:?}", parts.version),
-        headers,
-        body: preview,
+        headers: serialize_headers(&parts.headers),
+        focus_headers: summarize_headers(&parts.headers, HeaderFocus::Request),
+        body: body_preview(&parts.headers, &bytes, config.body_preview_bytes),
+        is_connect: parts.method.as_str().eq_ignore_ascii_case("CONNECT"),
     };
 
     let request = Request::from_parts(parts, Body::from(Full::new(bytes.clone())));
@@ -161,8 +182,6 @@ async fn capture_response(
         .await
         .context("failed collecting response body")?;
     let bytes = collected.to_bytes();
-    let preview = body_preview(&parts.headers, &bytes, config.body_preview_bytes);
-    let headers = serialize_headers(&parts.headers);
 
     let captured = CapturedResponse {
         timestamp_ms: now_ms(),
@@ -174,12 +193,65 @@ async fn capture_response(
             .canonical_reason()
             .unwrap_or("unknown")
             .to_string(),
-        headers,
-        body: preview,
+        headers: serialize_headers(&parts.headers),
+        focus_headers: summarize_headers(&parts.headers, HeaderFocus::Response),
+        body: body_preview(&parts.headers, &bytes, config.body_preview_bytes),
     };
 
     let response = Response::from_parts(parts, Body::from(Full::new(bytes.clone())));
     Ok((response, captured))
+}
+
+fn should_print_request(request: &CapturedRequest, config: &CaptureConfig) -> bool {
+    match config.output_mode {
+        OutputMode::Focused => false,
+        OutputMode::Pretty | OutputMode::Json => config.show_connect || !request.is_connect,
+    }
+}
+
+fn should_print_response(
+    request: &CapturedRequest,
+    response: &CapturedResponse,
+    config: &CaptureConfig,
+) -> bool {
+    if request.is_connect {
+        return config.show_connect && config.output_mode != OutputMode::Focused;
+    }
+
+    match config.output_mode {
+        OutputMode::Focused => is_api_like(request, response),
+        OutputMode::Pretty | OutputMode::Json => true,
+    }
+}
+
+fn is_api_like(request: &CapturedRequest, response: &CapturedResponse) -> bool {
+    let url = request.url.to_ascii_lowercase();
+    let request_has_json = request
+        .headers
+        .iter()
+        .any(|header| header.name == "accept" && header.value.contains("json"))
+        || request.headers.iter().any(|header| {
+            header.name == "content-type"
+                && (header.value.contains("json")
+                    || header.value.contains("graphql")
+                    || header.value.contains("x-www-form-urlencoded"))
+        });
+
+    let response_has_json = response.headers.iter().any(|header| {
+        header.name == "content-type"
+            && (header.value.contains("json")
+                || header.value.contains("javascript")
+                || header.value.contains("graphql"))
+    });
+
+    request.method != "GET"
+        || url.contains("/api/")
+        || url.contains("/graphql")
+        || url.contains("/rpc")
+        || url.contains("/query")
+        || request.host.starts_with("api.")
+        || request_has_json
+        || response_has_json
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +267,9 @@ struct CapturedRequest {
     host: String,
     version: String,
     headers: Vec<HeaderEntry>,
+    focus_headers: Vec<HeaderEntry>,
     body: BodyPreview,
+    is_connect: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -206,6 +280,7 @@ struct CapturedResponse {
     status: u16,
     reason: String,
     headers: Vec<HeaderEntry>,
+    focus_headers: Vec<HeaderEntry>,
     body: BodyPreview,
 }
 
@@ -220,12 +295,15 @@ struct BodyPreview {
     kind: BodyKind,
     preview: String,
     original_bytes: usize,
+    decoded_bytes: usize,
     truncated: bool,
+    encoding: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum BodyKind {
+    Json,
     Text,
     Binary,
     Empty,
@@ -260,6 +338,7 @@ impl EventPrinter {
     async fn print_request(&self, request: &CapturedRequest) {
         let _guard = self.gate.lock().await;
         match self.output_mode {
+            OutputMode::Focused => {}
             OutputMode::Pretty => {
                 println!(
                     "\n[request] {} {}\n  host: {}\n  version: {}",
@@ -278,6 +357,7 @@ impl EventPrinter {
     async fn print_response(&self, request: &CapturedRequest, response: &CapturedResponse) {
         let _guard = self.gate.lock().await;
         match self.output_mode {
+            OutputMode::Focused => print_focused_flow(request, response),
             OutputMode::Pretty => {
                 println!(
                     "[response] {} {} -> {} {}\n",
@@ -291,6 +371,33 @@ impl EventPrinter {
                 println!("{}", serde_json::to_string(&event).unwrap_or_default());
             }
         }
+    }
+}
+
+fn print_focused_flow(request: &CapturedRequest, response: &CapturedResponse) {
+    println!("\n[flow] {} {}", request.method, request.url);
+    println!("  status: {} {}", response.status, response.reason);
+
+    if !request.focus_headers.is_empty() {
+        println!("  request-headers:");
+        for header in &request.focus_headers {
+            println!("    {}: {}", header.name, header.value);
+        }
+    }
+
+    if !response.focus_headers.is_empty() {
+        println!("  response-headers:");
+        for header in &response.focus_headers {
+            println!("    {}: {}", header.name, header.value);
+        }
+    }
+
+    if request.body.kind != BodyKind::Empty {
+        print_body("request-body", &request.body);
+    }
+
+    if response.body.kind != BodyKind::Empty {
+        print_body("response-body", &response.body);
     }
 }
 
@@ -326,9 +433,42 @@ fn serialize_headers(headers: &HeaderMap) -> Vec<HeaderEntry> {
         .iter()
         .map(|(name, value)| HeaderEntry {
             name: name.as_str().to_string(),
-            value: String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            value: redact_header(name.as_str(), &String::from_utf8_lossy(value.as_bytes())),
         })
         .collect()
+}
+
+fn summarize_headers(headers: &HeaderMap, focus: HeaderFocus) -> Vec<HeaderEntry> {
+    let names = match focus {
+        HeaderFocus::Request => [
+            "content-type",
+            "accept",
+            "origin",
+            "referer",
+            "x-requested-with",
+            "x-discord-locale",
+            "authorization",
+        ]
+        .as_slice(),
+        HeaderFocus::Response => ["content-type", "content-encoding", "cache-control"].as_slice(),
+    };
+
+    names
+        .iter()
+        .filter_map(|name| {
+            headers.get(*name).map(|value| HeaderEntry {
+                name: (*name).to_string(),
+                value: redact_header(name, &String::from_utf8_lossy(value.as_bytes())),
+            })
+        })
+        .collect()
+}
+
+fn redact_header(name: &str, value: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "authorization" | "cookie" | "set-cookie" | "x-super-properties" => "<redacted>".into(),
+        _ => value.to_string(),
+    }
 }
 
 fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview {
@@ -337,24 +477,45 @@ fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview 
             kind: BodyKind::Empty,
             preview: String::new(),
             original_bytes: 0,
+            decoded_bytes: 0,
             truncated: false,
+            encoding: None,
         };
     }
 
-    let truncated = bytes.len() > limit;
-    let slice = &bytes[..bytes.len().min(limit)];
+    let encoding = headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase());
+
+    let decoded = decode_body(bytes, encoding.as_deref()).unwrap_or_else(|| bytes.to_vec());
+    let truncated = decoded.len() > limit;
+    let slice = &decoded[..decoded.len().min(limit)];
     let content_type = headers
         .get("content-type")
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
 
+    if let Some(pretty_json) = render_json_preview(slice) {
+        return BodyPreview {
+            kind: BodyKind::Json,
+            preview: pretty_json,
+            original_bytes: bytes.len(),
+            decoded_bytes: decoded.len(),
+            truncated,
+            encoding,
+        };
+    }
+
     if is_textual_content_type(&content_type) || std::str::from_utf8(slice).is_ok() {
         return BodyPreview {
             kind: BodyKind::Text,
             preview: String::from_utf8_lossy(slice).into_owned(),
             original_bytes: bytes.len(),
+            decoded_bytes: decoded.len(),
             truncated,
+            encoding,
         };
     }
 
@@ -368,7 +529,39 @@ fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview 
         kind: BodyKind::Binary,
         preview,
         original_bytes: bytes.len(),
+        decoded_bytes: decoded.len(),
         truncated,
+        encoding,
+    }
+}
+
+fn render_json_preview(slice: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(slice).ok()?;
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    serde_json::to_string_pretty(&value).ok()
+}
+
+fn decode_body(bytes: &[u8], encoding: Option<&str>) -> Option<Vec<u8>> {
+    match encoding {
+        Some("gzip") => {
+            let mut decoder = GzDecoder::new(bytes);
+            let mut output = Vec::new();
+            decoder.read_to_end(&mut output).ok()?;
+            Some(output)
+        }
+        Some("br") => {
+            let mut decoder = Decompressor::new(bytes, 4096);
+            let mut output = Vec::new();
+            decoder.read_to_end(&mut output).ok()?;
+            Some(output)
+        }
+        Some("deflate") => {
+            let mut decoder = ZlibDecoder::new(bytes);
+            let mut output = Vec::new();
+            decoder.read_to_end(&mut output).ok()?;
+            Some(output)
+        }
+        _ => Some(bytes.to_vec()),
     }
 }
 
@@ -381,6 +574,7 @@ fn is_textual_content_type(content_type: &str) -> bool {
             || value.contains("application/xml")
             || value.contains("application/x-www-form-urlencoded")
             || value.contains("application/graphql")
+            || value.contains("application/problem+json")
     )
 }
 
@@ -399,10 +593,17 @@ fn print_headers(headers: &[HeaderEntry]) {
 fn print_body(label: &str, body: &BodyPreview) {
     match body.kind {
         BodyKind::Empty => println!("  {label}: <empty>"),
-        BodyKind::Text | BodyKind::Binary => {
+        BodyKind::Json | BodyKind::Text | BodyKind::Binary => {
             println!(
-                "  {label}: kind={:?} bytes={} truncated={}",
-                body.kind, body.original_bytes, body.truncated
+                "  {label}: kind={:?} bytes={} decoded={} truncated={}{}",
+                body.kind,
+                body.original_bytes,
+                body.decoded_bytes,
+                body.truncated,
+                body.encoding
+                    .as_ref()
+                    .map(|value| format!(" encoding={value}"))
+                    .unwrap_or_default()
             );
             if body.preview.is_empty() {
                 println!("    <empty>");
@@ -429,9 +630,16 @@ fn internal_proxy_error(message: &'static str) -> Response<Body> {
         .expect("static 502 response is valid")
 }
 
+#[derive(Debug, Clone, Copy)]
+enum HeaderFocus {
+    Request,
+    Response,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Filters;
+    use super::{BodyKind, Filters, body_preview};
+    use hudsucker::hyper::HeaderMap;
 
     #[test]
     fn filters_match_when_all_constraints_pass() {
@@ -456,5 +664,13 @@ mod tests {
         };
 
         assert!(!filters.matches("GET", "discord.com", "https://discord.com"));
+    }
+
+    #[test]
+    fn body_preview_formats_json() {
+        let headers = HeaderMap::new();
+        let preview = body_preview(&headers, br#"{"ok":true,"items":[1,2]}"#, 512);
+        assert_eq!(preview.kind, BodyKind::Json);
+        assert!(preview.preview.contains("\"ok\": true"));
     }
 }

@@ -36,6 +36,7 @@ where
             methods: command.methods,
         },
         body_preview_bytes: command.body_preview_bytes,
+        show_connect: command.show_connect,
     });
 
     println!("proxy listening on http://{}", command.listen);

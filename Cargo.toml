@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+brotli = "8.0.2"
 clap = { version = "4.5.51", features = ["derive", "env"] }
 directories = "6.0.0"
+flate2 = "1.1.5"
 hudsucker = { version = "0.24.0", features = ["http2"] }
 http-body-util = "0.1.3"
 rcgen = { version = "0.14.7", features = ["aws_lc_rs", "crypto", "pem", "x509-parser"] }

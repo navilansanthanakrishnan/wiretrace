@@ -13,8 +13,10 @@ name = "agent-mcp-b"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "brotli",
  "clap",
  "directories",
+ "flate2",
  "http-body-util",
  "hudsucker",
  "rcgen",

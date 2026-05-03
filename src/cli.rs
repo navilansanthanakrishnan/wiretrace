@@ -13,7 +13,7 @@ pub struct Cli {
     #[arg(
         long,
         env = "AGENT_MCP_B_LOG",
-        default_value = "info",
+        default_value = "agent_mcp_b=info,proxy=off,hudsucker=off",
         help = "Tracing filter directive, for example info or agent_mcp_b=debug"
     )]
     pub log_filter: String,
@@ -28,6 +28,8 @@ pub enum Command {
     Proxy(ProxyCommand),
     /// Launch Chrome through the local interception proxy.
     Chrome(ChromeCommand),
+    /// Start the interception proxy and attach already-open macOS apps via the system proxy.
+    Attach(AttachCommand),
     /// Print paths used by the application runtime.
     Paths,
 }
@@ -41,7 +43,7 @@ pub struct ProxyCommand {
     )]
     pub listen: SocketAddr,
 
-    #[arg(long, value_enum, default_value_t = OutputMode::Pretty)]
+    #[arg(long, value_enum, default_value_t = OutputMode::Focused)]
     pub output: OutputMode,
 
     #[arg(
@@ -71,6 +73,13 @@ pub struct ProxyCommand {
         help = "Maximum number of request or response body bytes to print"
     )]
     pub body_preview_bytes: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Print raw CONNECT tunnel setup requests in addition to intercepted HTTP requests"
+    )]
+    pub show_connect: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -104,8 +113,29 @@ pub struct ChromeCommand {
     pub user_data_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct AttachCommand {
+    #[command(flatten)]
+    pub proxy: ProxyCommand,
+
+    #[arg(
+        long,
+        default_value = "Wi-Fi",
+        help = "macOS network service to attach the system web and secure web proxies to"
+    )]
+    pub service: String,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Leave the system proxy enabled when the command exits instead of restoring the previous settings"
+    )]
+    pub leave_enabled: bool,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum OutputMode {
+    Focused,
     Pretty,
     Json,
 }

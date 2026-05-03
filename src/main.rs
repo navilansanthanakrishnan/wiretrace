@@ -1,9 +1,11 @@
 mod app;
+mod attach;
 mod chrome;
 mod cli;
 mod commands;
 mod logging;
 mod proxy;
+mod system_proxy;
 
 use anyhow::Result;
 use clap::Parser;
@@ -22,6 +24,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Proxy(command) => commands::run_proxy(&paths, command).await?,
         Command::Chrome(command) => commands::run_chrome(&paths, command).await?,
+        Command::Attach(command) => commands::run_attach(&paths, command).await?,
         Command::Paths => {
             println!("root={}", paths.root.display());
             println!("certs={}", paths.certs_dir.display());
