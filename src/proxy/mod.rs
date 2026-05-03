@@ -2,4 +2,4 @@ mod authority;
 mod capture;
 mod runtime;
 
-pub use runtime::run;
+pub use runtime::{run, run_with_shutdown};

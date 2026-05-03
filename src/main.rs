@@ -1,4 +1,5 @@
 mod app;
+mod chrome;
 mod cli;
 mod commands;
 mod logging;

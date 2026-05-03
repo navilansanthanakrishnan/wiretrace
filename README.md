@@ -10,17 +10,14 @@
 - Filter by host substring, URL substring, and HTTP method
 - Emit either human-readable terminal output or JSON lines
 - Generate and persist a local certificate authority for HTTPS interception
-
-## Next capability
-
-- Launch Chrome through the proxy for a managed capture session
+- Launch Chrome through the proxy with a managed profile directory
 
 ## Commands
 
 ```bash
 cargo run -- paths
 cargo run -- proxy --listen 127.0.0.1:8787
-cargo run -- chrome --open https://discord.com
+cargo run -- chrome --open https://discord.com --insecure-ignore-cert-errors
 ```
 
 Route traffic through the proxy with a tool like `curl`:
@@ -30,3 +27,11 @@ curl --proxy http://127.0.0.1:8787 http://example.com
 ```
 
 When the proxy starts, it prints the local CA certificate path. Trust that certificate in the client or OS to inspect HTTPS traffic without certificate warnings.
+
+For a managed Chrome session, the tool launches Chrome with the proxy already configured:
+
+```bash
+cargo run -- chrome --listen 127.0.0.1:8787 --open https://example.com
+```
+
+Use `--insecure-ignore-cert-errors` only for first-run sessions before the local CA is trusted.

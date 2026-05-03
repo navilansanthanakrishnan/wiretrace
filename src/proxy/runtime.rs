@@ -11,6 +11,20 @@ use super::authority::CertificateAuthorityPaths;
 use super::capture::{CaptureConfig, CaptureHandler, Filters};
 
 pub async fn run(paths: &AppPaths, command: ProxyCommand) -> Result<()> {
+    run_with_shutdown(paths, command, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+pub async fn run_with_shutdown<F>(
+    paths: &AppPaths,
+    command: ProxyCommand,
+    shutdown: F,
+) -> Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let ca_paths = CertificateAuthorityPaths::from_app_paths(paths);
     let certificate_authority = ca_paths.load_or_create()?;
 
@@ -33,9 +47,7 @@ pub async fn run(paths: &AppPaths, command: ProxyCommand) -> Result<()> {
         .with_ca(certificate_authority)
         .with_rustls_connector(aws_lc_rs::default_provider())
         .with_http_handler(CaptureHandler::new(config))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown)
         .build()
         .context("failed to construct proxy runtime")?;
 
