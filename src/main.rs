@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod commands;
 mod logging;
+mod proxy;
 
 use anyhow::Result;
 use clap::Parser;
