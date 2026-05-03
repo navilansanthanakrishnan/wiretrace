@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use hudsucker::Proxy;
 use hudsucker::rustls::crypto::aws_lc_rs;
 
@@ -25,6 +26,8 @@ pub async fn run_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    ensure_listen_available(command.listen)?;
+
     let ca_paths = CertificateAuthorityPaths::from_app_paths(paths);
     let certificate_authority = ca_paths.load_or_create()?;
 
@@ -53,4 +56,21 @@ where
         .context("failed to construct proxy runtime")?;
 
     proxy.start().await.context("proxy exited with an error")
+}
+
+pub fn ensure_listen_available(listen: SocketAddr) -> Result<()> {
+    match std::net::TcpListener::bind(listen) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            bail!(
+                "listen address {listen} is already in use. stop the existing process on that port or choose a different --listen value"
+            )
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed checking whether {listen} is available"))
+        }
+    }
 }

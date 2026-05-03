@@ -21,6 +21,8 @@ const DEFAULT_CHROME_PATHS: &[&str] = &[
 ];
 
 pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
+    proxy::ensure_listen_available(command.proxy.listen)?;
+
     let chrome_path = resolve_chrome_path(command.chrome_path.as_deref())?;
     let profile_dir = ManagedProfileDir::new(command.user_data_dir.clone())?;
     let proxy_paths = paths.clone();

@@ -64,6 +64,8 @@ cargo run -- attach --listen 127.0.0.1:8787 --service Wi-Fi
 
 That temporarily enables the system web and secure web proxies so existing apps can be captured on their next network requests. The previous proxy settings are restored when the command exits.
 
+If you see an "address already in use" error, an existing `agent-mcp-b` process is still listening on that port. Stop it first or pick a different `--listen` port.
+
 For Discord-like API capture, the focused mode is usually the cleanest:
 
 ```bash

@@ -6,6 +6,8 @@ use crate::proxy;
 use crate::system_proxy;
 
 pub async fn run(paths: &AppPaths, command: AttachCommand) -> Result<()> {
+    proxy::ensure_listen_available(command.proxy.listen)?;
+
     let snapshot = system_proxy::capture_snapshot(&command.service).await?;
     system_proxy::enable_local_proxy(&command.service, command.proxy.listen).await?;
 
