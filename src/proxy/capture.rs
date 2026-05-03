@@ -465,10 +465,28 @@ fn summarize_headers(headers: &HeaderMap, focus: HeaderFocus) -> Vec<HeaderEntry
 }
 
 fn redact_header(name: &str, value: &str) -> String {
-    match name.to_ascii_lowercase().as_str() {
-        "authorization" | "cookie" | "set-cookie" | "x-super-properties" => "<redacted>".into(),
-        _ => value.to_string(),
+    if is_sensitive_name(name) {
+        "<redacted>".into()
+    } else {
+        value.to_string()
     }
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-super-properties"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "api_key"
+            | "apikey"
+            | "secret"
+    )
 }
 
 fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview {
@@ -537,8 +555,29 @@ fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview 
 
 fn render_json_preview(slice: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(slice).ok()?;
-    let value = serde_json::from_str::<Value>(text).ok()?;
+    let mut value = serde_json::from_str::<Value>(text).ok()?;
+    redact_json_value(&mut value);
     serde_json::to_string_pretty(&value).ok()
+}
+
+fn redact_json_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map.iter_mut() {
+                if is_sensitive_name(key) {
+                    *nested = Value::String("<redacted>".into());
+                } else {
+                    redact_json_value(nested);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_json_value(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn decode_body(bytes: &[u8], encoding: Option<&str>) -> Option<Vec<u8>> {
@@ -638,8 +677,15 @@ enum HeaderFocus {
 
 #[cfg(test)]
 mod tests {
-    use super::{BodyKind, Filters, body_preview};
-    use hudsucker::hyper::HeaderMap;
+    use std::io::Write;
+
+    use flate2::{Compression, write::GzEncoder};
+    use hudsucker::hyper::{HeaderMap, http::HeaderValue};
+
+    use super::{
+        BodyKind, BodyPreview, CapturedRequest, CapturedResponse, Filters, HeaderEntry,
+        body_preview, is_api_like, serialize_headers,
+    };
 
     #[test]
     fn filters_match_when_all_constraints_pass() {
@@ -672,5 +718,111 @@ mod tests {
         let preview = body_preview(&headers, br#"{"ok":true,"items":[1,2]}"#, 512);
         assert_eq!(preview.kind, BodyKind::Json);
         assert!(preview.preview.contains("\"ok\": true"));
+    }
+
+    #[test]
+    fn serialize_headers_redacts_sensitive_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer super-secret"));
+        headers.insert("cookie", HeaderValue::from_static("token=super-secret"));
+        headers.insert("accept", HeaderValue::from_static("application/json"));
+
+        let serialized = serialize_headers(&headers);
+
+        assert!(serialized.iter().any(|entry| {
+            entry.name == "authorization" && entry.value == "<redacted>"
+        }));
+        assert!(serialized
+            .iter()
+            .any(|entry| entry.name == "cookie" && entry.value == "<redacted>"));
+        assert!(serialized.iter().any(|entry| {
+            entry.name == "accept" && entry.value == "application/json"
+        }));
+    }
+
+    #[test]
+    fn body_preview_decodes_gzip_json() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(br#"{"ok":true,"items":[1,2]}"#).unwrap();
+        let bytes = encoder.finish().unwrap();
+
+        let preview = body_preview(&headers, &bytes, 512);
+        assert_eq!(preview.kind, BodyKind::Json);
+        assert_eq!(preview.encoding.as_deref(), Some("gzip"));
+        assert!(preview.preview.contains("\"items\": ["));
+    }
+
+    #[test]
+    fn body_preview_redacts_sensitive_json_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let preview = body_preview(
+            &headers,
+            br#"{"headers":{"Authorization":"Bearer super-secret-token"},"access_token":"abc123"}"#,
+            512,
+        );
+
+        assert_eq!(preview.kind, BodyKind::Json);
+        assert!(preview.preview.contains("\"Authorization\": \"<redacted>\""));
+        assert!(preview.preview.contains("\"access_token\": \"<redacted>\""));
+        assert!(!preview.preview.contains("super-secret-token"));
+        assert!(!preview.preview.contains("abc123"));
+    }
+
+    #[test]
+    fn api_like_heuristic_ignores_basic_html_get() {
+        let request = CapturedRequest {
+            timestamp_ms: 0,
+            method: "GET".into(),
+            url: "https://example.com/".into(),
+            host: "example.com".into(),
+            version: "HTTP/1.1".into(),
+            headers: vec![HeaderEntry {
+                name: "accept".into(),
+                value: "text/html".into(),
+            }],
+            focus_headers: Vec::new(),
+            body: empty_body_preview(),
+            is_connect: false,
+        };
+
+        let response = CapturedResponse {
+            timestamp_ms: 0,
+            request_method: request.method.clone(),
+            request_url: request.url.clone(),
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![HeaderEntry {
+                name: "content-type".into(),
+                value: "text/html; charset=utf-8".into(),
+            }],
+            focus_headers: Vec::new(),
+            body: BodyPreview {
+                kind: BodyKind::Text,
+                preview: "<html></html>".into(),
+                original_bytes: 13,
+                decoded_bytes: 13,
+                truncated: false,
+                encoding: None,
+            },
+        };
+
+        assert!(!is_api_like(&request, &response));
+    }
+
+    fn empty_body_preview() -> BodyPreview {
+        BodyPreview {
+            kind: BodyKind::Empty,
+            preview: String::new(),
+            original_bytes: 0,
+            decoded_bytes: 0,
+            truncated: false,
+            encoding: None,
+        }
     }
 }

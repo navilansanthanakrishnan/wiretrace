@@ -282,6 +282,7 @@ Build and test with:
 ```bash
 cargo check
 cargo test
+./scripts/smoke-eval-sites.sh
 ```
 
 The project currently uses:
