@@ -147,6 +147,21 @@ The proxy exposes three output modes.
 - emits structured JSON-line events
 - useful when another tool will consume the capture stream
 
+## Interaction-Scoped Capture
+
+The proxy can also run in a manual interaction mode:
+
+```bash
+cargo run -- chrome \
+  --listen 127.0.0.1:8787 \
+  --open https://discord.com \
+  --host-contains discord.com \
+  --url-contains /api/ \
+  --interaction-mode manual
+```
+
+In this mode, the proxy still owns the transport path, but it only emits captures for requests that begin within a manually armed time window. When the proxy starts, press `Enter` in the terminal immediately before the UI action you care about, then perform the click, form submit, or navigation. This is an approximation of UI causality, not a full UI-event attribution engine.
+
 ## Commands
 
 ### Print Runtime Paths

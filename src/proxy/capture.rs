@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,7 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::cli::OutputMode;
+use crate::cli::{InteractionMode, OutputMode};
 
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
@@ -20,6 +21,7 @@ pub struct CaptureConfig {
     pub filters: Filters,
     pub body_preview_bytes: usize,
     pub show_connect: bool,
+    pub interaction: InteractionCapture,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -27,6 +29,46 @@ pub struct Filters {
     pub host_contains: Vec<String>,
     pub url_contains: Vec<String>,
     pub methods: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InteractionCapture {
+    mode: InteractionMode,
+    window_ms: u64,
+    armed_until_ms: Arc<AtomicU64>,
+}
+
+impl InteractionCapture {
+    pub fn new(mode: InteractionMode, window_ms: u64) -> Self {
+        Self {
+            mode,
+            window_ms,
+            armed_until_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn mode(&self) -> InteractionMode {
+        self.mode
+    }
+
+    pub fn window_ms(&self) -> u64 {
+        self.window_ms
+    }
+
+    pub fn arm_now(&self) -> u128 {
+        let deadline = now_ms().saturating_add(self.window_ms as u128);
+        self.armed_until_ms.store(deadline as u64, Ordering::Relaxed);
+        deadline
+    }
+
+    pub fn should_capture_now(&self) -> bool {
+        match self.mode {
+            InteractionMode::Off => true,
+            InteractionMode::Manual => {
+                now_ms() <= self.armed_until_ms.load(Ordering::Relaxed) as u128
+            }
+        }
+    }
 }
 
 impl Filters {
@@ -145,6 +187,11 @@ async fn capture_request(
     let url = request_url(&parts.headers, &parts.uri, None);
 
     if !config.filters.matches(parts.method.as_str(), &host, &url) {
+        let request = Request::from_parts(parts, body);
+        return Ok((request, None));
+    }
+
+    if !config.interaction.should_capture_now() {
         let request = Request::from_parts(parts, body);
         return Ok((request, None));
     }
@@ -684,8 +731,9 @@ mod tests {
 
     use super::{
         BodyKind, BodyPreview, CapturedRequest, CapturedResponse, Filters, HeaderEntry,
-        body_preview, is_api_like, serialize_headers,
+        InteractionCapture, body_preview, is_api_like, serialize_headers,
     };
+    use crate::cli::InteractionMode;
 
     #[test]
     fn filters_match_when_all_constraints_pass() {
@@ -813,6 +861,15 @@ mod tests {
         };
 
         assert!(!is_api_like(&request, &response));
+    }
+
+    #[test]
+    fn manual_interaction_gate_requires_arming() {
+        let interaction = InteractionCapture::new(InteractionMode::Manual, 1000);
+        assert!(!interaction.should_capture_now());
+
+        interaction.arm_now();
+        assert!(interaction.should_capture_now());
     }
 
     fn empty_body_preview() -> BodyPreview {

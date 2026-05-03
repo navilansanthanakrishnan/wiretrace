@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::io::{self, BufRead};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -6,10 +7,10 @@ use hudsucker::Proxy;
 use hudsucker::rustls::crypto::aws_lc_rs;
 
 use crate::app::AppPaths;
-use crate::cli::ProxyCommand;
+use crate::cli::{InteractionMode, ProxyCommand};
 
 use super::authority::CertificateAuthorityPaths;
-use super::capture::{CaptureConfig, CaptureHandler, Filters};
+use super::capture::{CaptureConfig, CaptureHandler, Filters, InteractionCapture};
 
 pub async fn run(paths: &AppPaths, command: ProxyCommand) -> Result<()> {
     run_with_shutdown(paths, command, async {
@@ -30,6 +31,10 @@ where
 
     let ca_paths = CertificateAuthorityPaths::from_app_paths(paths);
     let certificate_authority = ca_paths.load_or_create()?;
+    let interaction = InteractionCapture::new(
+        command.interaction_mode,
+        command.interaction_window_ms,
+    );
 
     let config = Arc::new(CaptureConfig {
         output_mode: command.output,
@@ -40,10 +45,21 @@ where
         },
         body_preview_bytes: command.body_preview_bytes,
         show_connect: command.show_connect,
+        interaction: interaction.clone(),
     });
 
     println!("proxy listening on http://{}", command.listen);
     println!("ca certificate: {}", ca_paths.cert_path().display());
+    match interaction.mode() {
+        InteractionMode::Off => {}
+        InteractionMode::Manual => {
+            println!(
+                "interaction mode: manual\npress Enter right before the UI action to arm a {}ms capture window\n",
+                interaction.window_ms()
+            );
+            start_manual_interaction_loop(interaction);
+        }
+    }
     println!("press Ctrl+C to stop\n");
 
     let proxy = Proxy::builder()
@@ -73,4 +89,21 @@ pub fn ensure_listen_available(listen: SocketAddr) -> Result<()> {
             Err(error).with_context(|| format!("failed checking whether {listen} is available"))
         }
     }
+}
+
+fn start_manual_interaction_loop(interaction: InteractionCapture) {
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            if line.is_err() {
+                break;
+            }
+
+            let _deadline = interaction.arm_now();
+            println!(
+                "armed interaction capture window for {}ms",
+                interaction.window_ms()
+            );
+        }
+    });
 }

@@ -82,6 +82,21 @@ pub struct ProxyCommand {
         help = "Print raw CONNECT tunnel setup requests in addition to intercepted HTTP requests"
     )]
     pub show_connect: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = InteractionMode::Off,
+        help = "Capture every matching request, or only requests that begin within a manually armed interaction window"
+    )]
+    pub interaction_mode: InteractionMode,
+
+    #[arg(
+        long,
+        default_value_t = 4000,
+        help = "When interaction mode is manual, capture requests that begin within this many milliseconds after you arm the window"
+    )]
+    pub interaction_window_ms: u64,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -154,4 +169,10 @@ pub enum OutputMode {
     Focused,
     Pretty,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum InteractionMode {
+    Off,
+    Manual,
 }
