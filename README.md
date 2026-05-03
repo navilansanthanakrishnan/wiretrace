@@ -1,5 +1,7 @@
 # agent-mcp-b
 
+## Goal
+  eventual goal is to allow custom MCPs built or workflows, automatically through a multi agent system and also allowing an agent to use this tool as a way to automate interections on websites,apps etc instead of interecting through UI or dom
 `agent-mcp-b` is a terminal-first HTTP(S) interception system written in Rust. It is designed to capture application-layer traffic in a way that is explicit, inspectable, and production-shaped rather than script-like.
 
 At a high level, the tool runs a local man-in-the-middle proxy, terminates outbound TLS with a locally generated certificate authority, forwards requests upstream, and emits structured request/response captures to the terminal. It supports two routing models on macOS:
