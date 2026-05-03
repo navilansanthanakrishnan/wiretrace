@@ -2,9 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use hudsucker::certificate_authority::RcgenAuthority;
+use hudsucker::certificate_authority::OpensslAuthority;
+use hudsucker::openssl::{hash::MessageDigest, pkey::PKey, x509::X509};
 use hudsucker::rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
 };
 use hudsucker::rustls::crypto::aws_lc_rs;
 
@@ -37,7 +38,7 @@ impl CertificateAuthorityPaths {
         Ok(())
     }
 
-    pub fn load_or_create(&self) -> Result<RcgenAuthority> {
+    pub fn load_or_create(&self) -> Result<OpensslAuthority> {
         let (cert_pem, key_pem) = if self.cert_path.exists() && self.key_path.exists() {
             let cert =
                 fs::read_to_string(&self.cert_path).context("failed reading CA certificate")?;
@@ -51,12 +52,15 @@ impl CertificateAuthorityPaths {
             (cert, key)
         };
 
-        let key_pair = KeyPair::from_pem(&key_pem).context("failed parsing CA private key PEM")?;
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key_pair)
-            .context("failed parsing generated CA certificate PEM")?;
+        let private_key = PKey::private_key_from_pem(key_pem.as_bytes())
+            .context("failed parsing CA private key PEM for OpenSSL authority")?;
+        let certificate = X509::from_pem(cert_pem.as_bytes())
+            .context("failed parsing CA certificate PEM for OpenSSL authority")?;
 
-        Ok(RcgenAuthority::new(
-            issuer,
+        Ok(OpensslAuthority::new(
+            private_key,
+            certificate,
+            MessageDigest::sha256(),
             CERT_CACHE_SIZE,
             aws_lc_rs::default_provider(),
         ))
