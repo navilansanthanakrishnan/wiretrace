@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -94,6 +95,9 @@ async fn launch_chrome(
 ) -> Result<Child> {
     let mut process = Command::new(chrome_path);
     process.kill_on_drop(true);
+    process.stdin(Stdio::null());
+    process.stdout(Stdio::null());
+    process.stderr(Stdio::null());
 
     process.arg(format!("--proxy-server=http://{}", command.proxy.listen));
     process.arg("--proxy-bypass-list=<-loopback>");
