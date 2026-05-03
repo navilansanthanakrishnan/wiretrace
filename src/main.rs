@@ -3,6 +3,7 @@ mod attach;
 mod chrome;
 mod cli;
 mod commands;
+mod local_ca;
 mod logging;
 mod proxy;
 mod system_proxy;
@@ -25,6 +26,7 @@ async fn main() -> Result<()> {
         Command::Proxy(command) => commands::run_proxy(&paths, command).await?,
         Command::Chrome(command) => commands::run_chrome(&paths, command).await?,
         Command::Attach(command) => commands::run_attach(&paths, command).await?,
+        Command::Ca(command) => commands::run_ca(&paths, command).await?,
         Command::Paths => {
             println!("root={}", paths.root.display());
             println!("certs={}", paths.certs_dir.display());

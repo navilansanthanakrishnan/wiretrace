@@ -17,6 +17,8 @@
 
 ```bash
 cargo run -- paths
+cargo run -- ca status
+cargo run -- ca trust
 cargo run -- proxy --listen 127.0.0.1:8787
 cargo run -- chrome --open https://discord.com --insecure-ignore-cert-errors
 cargo run -- attach --service Wi-Fi --host-contains discord.com --url-contains /api/
@@ -29,6 +31,12 @@ curl --proxy http://127.0.0.1:8787 http://example.com
 ```
 
 When the proxy starts, it prints the local CA certificate path. Trust that certificate in the client or OS to inspect HTTPS traffic without certificate warnings.
+
+On macOS, trust the local CA in your login keychain with:
+
+```bash
+cargo run -- ca trust
+```
 
 For a managed Chrome session, the tool launches Chrome with the proxy already configured:
 

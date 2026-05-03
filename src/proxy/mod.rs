@@ -1,4 +1,4 @@
-mod authority;
+pub(crate) mod authority;
 mod capture;
 mod runtime;
 

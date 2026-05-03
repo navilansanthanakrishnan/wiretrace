@@ -30,6 +30,8 @@ pub enum Command {
     Chrome(ChromeCommand),
     /// Start the interception proxy and attach already-open macOS apps via the system proxy.
     Attach(AttachCommand),
+    /// Install or inspect the local CA used for HTTPS interception.
+    Ca(CaCommand),
     /// Print paths used by the application runtime.
     Paths,
 }
@@ -131,6 +133,20 @@ pub struct AttachCommand {
         help = "Leave the system proxy enabled when the command exits instead of restoring the previous settings"
     )]
     pub leave_enabled: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CaCommand {
+    #[command(subcommand)]
+    pub action: CaAction,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CaAction {
+    /// Print the CA certificate path and whether the file exists.
+    Status,
+    /// Trust the CA certificate in the current user's macOS login keychain.
+    Trust,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]

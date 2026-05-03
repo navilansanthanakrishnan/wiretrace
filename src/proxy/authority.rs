@@ -32,6 +32,11 @@ impl CertificateAuthorityPaths {
         &self.cert_path
     }
 
+    pub fn ensure_materialized(&self) -> Result<()> {
+        let _ = self.load_or_create()?;
+        Ok(())
+    }
+
     pub fn load_or_create(&self) -> Result<RcgenAuthority> {
         let (cert_pem, key_pem) = if self.cert_path.exists() && self.key_path.exists() {
             let cert =
