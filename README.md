@@ -38,6 +38,16 @@ On macOS, trust the local CA in your login keychain with:
 cargo run -- ca trust
 ```
 
+If you used an earlier build, run `cargo run -- ca trust` again once after upgrading. The trust command now writes the CA into the user trust domain that Chrome consumes on macOS.
+
+Check the trust state with:
+
+```bash
+cargo run -- ca status
+```
+
+You should see `user_trust_contains_ca=true`. After trusting the CA, fully quit Chrome and reopen it before testing an HSTS site like Discord.
+
 For a managed Chrome session, the tool launches Chrome with the proxy already configured:
 
 ```bash
@@ -60,7 +70,6 @@ For Discord-like API capture, the focused mode is usually the cleanest:
 cargo run -- chrome \
   --listen 127.0.0.1:8787 \
   --open https://discord.com \
-  --insecure-ignore-cert-errors \
   --host-contains discord.com \
   --url-contains /api/
 ```
