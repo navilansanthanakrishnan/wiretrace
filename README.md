@@ -1,6 +1,6 @@
 # agent-mcp-b
 
-`agent-mcp-b` is a terminal-first HTTP(S) interception tool inspired by products like Kampala, but built as an understandable Rust codebase with a clean CLI and app-launch flows.
+`agent-mcp-b` is a terminal-first HTTP(S) interception tool but built as an understandable Rust codebase with a clean CLI and app-launch flows.
 
 ## Current capabilities
 
