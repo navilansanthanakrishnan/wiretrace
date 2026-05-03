@@ -20,7 +20,7 @@ const DEFAULT_CHROME_PATHS: &[&str] = &[
 ];
 
 pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
-    let chrome_target = resolve_chrome_target(command.chrome_path.as_deref())?;
+    let chrome_path = resolve_chrome_path(command.chrome_path.as_deref())?;
     let profile_dir = ManagedProfileDir::new(command.user_data_dir.clone())?;
     let proxy_paths = paths.clone();
 
@@ -41,16 +41,11 @@ pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
 
     wait_for_proxy(command.proxy.listen).await?;
 
-    let mut child = launch_chrome(&chrome_target, &profile_dir, &command)
+    let mut child = launch_chrome(&chrome_path, &profile_dir, &command)
         .await
-        .with_context(|| {
-            format!(
-                "failed to launch Chrome at {}",
-                chrome_target.display().display()
-            )
-        })?;
+        .with_context(|| format!("failed to launch Chrome at {}", chrome_path.display()))?;
 
-    println!("launched Chrome from {}", chrome_target.display().display());
+    println!("launched Chrome from {}", chrome_path.display());
     println!("profile directory: {}", profile_dir.path().display());
     println!("proxy address: http://{}", command.proxy.listen);
     println!("close Chrome or press Ctrl+C to stop\n");
@@ -93,20 +88,12 @@ pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
 }
 
 async fn launch_chrome(
-    chrome_target: &ChromeTarget,
+    chrome_path: &Path,
     profile_dir: &ManagedProfileDir,
     command: &ChromeCommand,
 ) -> Result<Child> {
-    let mut process = match chrome_target {
-        ChromeTarget::MacApp { app_bundle, .. } => {
-            let mut command = Command::new("open");
-            command.arg("-na");
-            command.arg(app_bundle);
-            command.arg("--args");
-            command
-        }
-        ChromeTarget::Executable(path) => Command::new(path),
-    };
+    let mut process = Command::new(chrome_path);
+    process.kill_on_drop(true);
 
     process.arg(format!("--proxy-server=http://{}", command.proxy.listen));
     process.arg("--proxy-bypass-list=<-loopback>");
@@ -124,26 +111,18 @@ async fn launch_chrome(
     process.spawn().context("failed to spawn Chrome process")
 }
 
-fn resolve_chrome_target(override_path: Option<&Path>) -> Result<ChromeTarget> {
+fn resolve_chrome_path(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         if path.is_file() {
-            return Ok(chrome_target_from_path(path.to_path_buf()));
+            return Ok(path.to_path_buf());
         }
-
-        if path.is_dir() && path.extension().and_then(|value| value.to_str()) == Some("app") {
-            return Ok(ChromeTarget::MacApp {
-                display: path.to_path_buf(),
-                app_bundle: path.to_path_buf(),
-            });
-        }
-
         bail!("provided Chrome path does not exist: {}", path.display());
     }
 
     for candidate in DEFAULT_CHROME_PATHS {
         let path = PathBuf::from(candidate);
         if path.is_file() {
-            return Ok(chrome_target_from_path(path));
+            return Ok(path);
         }
     }
 
@@ -163,24 +142,6 @@ enum SessionOutcome {
     Proxy(Result<()>),
     ChromeExited(ExitStatus),
     Interrupted,
-}
-
-#[derive(Debug, Clone)]
-enum ChromeTarget {
-    MacApp {
-        display: PathBuf,
-        app_bundle: PathBuf,
-    },
-    Executable(PathBuf),
-}
-
-impl ChromeTarget {
-    fn display(&self) -> &Path {
-        match self {
-            Self::MacApp { display, .. } => display.as_path(),
-            Self::Executable(path) => path.as_path(),
-        }
-    }
 }
 
 enum ManagedProfileDir {
@@ -216,33 +177,6 @@ impl ManagedProfileDir {
             Self::Temporary(temp_dir) => temp_dir.path(),
         }
     }
-}
-
-fn chrome_target_from_path(path: PathBuf) -> ChromeTarget {
-    if let Some(app_bundle) = mac_app_bundle_from_executable(&path) {
-        ChromeTarget::MacApp {
-            display: path,
-            app_bundle,
-        }
-    } else {
-        ChromeTarget::Executable(path)
-    }
-}
-
-fn mac_app_bundle_from_executable(path: &Path) -> Option<PathBuf> {
-    let contents = path
-        .components()
-        .map(|component| component.as_os_str().to_owned())
-        .collect::<Vec<_>>();
-
-    let contents_index = contents
-        .iter()
-        .position(|component| component == "Contents")?;
-    if contents_index == 0 {
-        return None;
-    }
-
-    Some(contents[..contents_index].iter().collect())
 }
 
 async fn wait_for_proxy(listen: std::net::SocketAddr) -> Result<()> {
