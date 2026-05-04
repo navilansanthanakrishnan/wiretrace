@@ -166,6 +166,7 @@ pub enum CaAction {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum OutputMode {
+    Simple,
     Focused,
     Pretty,
     Json,

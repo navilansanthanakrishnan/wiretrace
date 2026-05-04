@@ -139,6 +139,10 @@ The proxy exposes three output modes.
 - prints only higher-signal API-like flows
 - suppresses most browser noise such as ordinary page asset fetches
 
+`simple`
+- prints one compact line per matched flow
+- useful when you want method + operation name + tiny payload summary without header/body noise
+
 `pretty`
 - prints verbose request and response blocks
 - useful for manual debugging

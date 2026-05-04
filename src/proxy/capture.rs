@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Read;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,6 +12,7 @@ use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use url::Url;
 
 use crate::cli::{InteractionMode, OutputMode};
 use crate::interaction::{InteractionCapture, InteractionContext};
@@ -216,7 +218,7 @@ async fn capture_response(
 
 fn should_print_request(request: &CapturedRequest, config: &CaptureConfig) -> bool {
     match config.output_mode {
-        OutputMode::Focused => false,
+        OutputMode::Simple | OutputMode::Focused => false,
         OutputMode::Pretty | OutputMode::Json => config.show_connect || !request.is_connect,
     }
 }
@@ -231,6 +233,7 @@ fn should_print_response(
     }
 
     match config.output_mode {
+        OutputMode::Simple => true,
         OutputMode::Focused => is_api_like(request, response),
         OutputMode::Pretty | OutputMode::Json => true,
     }
@@ -258,6 +261,7 @@ fn is_api_like(request: &CapturedRequest, response: &CapturedResponse) -> bool {
 
     request.method != "GET"
         || url.contains("/api/")
+        || url.contains("/trpc/")
         || url.contains("/graphql")
         || url.contains("/rpc")
         || url.contains("/query")
@@ -351,7 +355,7 @@ impl EventPrinter {
     async fn print_request(&self, request: &CapturedRequest) {
         let _guard = self.gate.lock().await;
         match self.output_mode {
-            OutputMode::Focused => {}
+            OutputMode::Simple | OutputMode::Focused => {}
             OutputMode::Pretty => {
                 println!(
                     "\n[request] {} {}\n  host: {}\n  version: {}",
@@ -382,6 +386,7 @@ impl EventPrinter {
     async fn print_response(&self, request: &CapturedRequest, response: &CapturedResponse) {
         let _guard = self.gate.lock().await;
         match self.output_mode {
+            OutputMode::Simple => print_simple_flow(request, response),
             OutputMode::Focused => print_focused_flow(request, response),
             OutputMode::Pretty => {
                 println!(
@@ -397,6 +402,19 @@ impl EventPrinter {
             }
         }
     }
+}
+
+fn print_simple_flow(request: &CapturedRequest, response: &CapturedResponse) {
+    let operation = compact_operation_label(request);
+    let summary = compact_body_summary(&response.body);
+    let mut line = format!("{} ({}) {}", request.method, operation, summary);
+    let _ = write!(line, " [{}]", response.status);
+
+    if let Some(interaction) = &request.interaction {
+        let _ = write!(line, " #{}", interaction.id);
+    }
+
+    println!("{line}");
 }
 
 fn print_focused_flow(request: &CapturedRequest, response: &CapturedResponse) {
@@ -437,6 +455,58 @@ fn print_focused_flow(request: &CapturedRequest, response: &CapturedResponse) {
     if response.body.kind != BodyKind::Empty {
         print_body("response-body", &response.body);
     }
+}
+
+fn compact_operation_label(request: &CapturedRequest) -> String {
+    if let Ok(url) = Url::parse(&request.url) {
+        let path = url.path().trim_end_matches('/');
+
+        if let Some(proc_name) = path.strip_prefix("/trpc/") {
+            return proc_name.to_string();
+        }
+
+        if let Some(last) = path.rsplit('/').find(|segment| !segment.is_empty()) {
+            return last.to_string();
+        }
+    }
+
+    request.host.clone()
+}
+
+fn compact_body_summary(body: &BodyPreview) -> String {
+    match body.kind {
+        BodyKind::Empty => "{}".to_string(),
+        BodyKind::Json => compact_json_summary(&body.preview),
+        BodyKind::Text => "{text}".to_string(),
+        BodyKind::Binary => "{binary}".to_string(),
+    }
+}
+
+fn compact_json_summary(preview: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(preview) else {
+        return "{json}".to_string();
+    };
+
+    match value {
+        Value::Object(map) => format!("{{{}}}", summarize_json_keys(map.keys().cloned().collect())),
+        Value::Array(items) => {
+            if let Some(Value::Object(map)) = items.first() {
+                format!("{{{}}}", summarize_json_keys(map.keys().cloned().collect()))
+            } else {
+                format!("[{}]", items.len())
+            }
+        }
+        Value::Null => "{null}".to_string(),
+        Value::Bool(_) => "{bool}".to_string(),
+        Value::Number(_) => "{number}".to_string(),
+        Value::String(_) => "{string}".to_string(),
+    }
+}
+
+fn summarize_json_keys(mut keys: Vec<String>) -> String {
+    keys.sort();
+    keys.truncate(3);
+    keys.join(",")
 }
 
 fn host_from_headers(headers: &HeaderMap, uri: &Uri) -> String {
@@ -722,7 +792,8 @@ mod tests {
 
     use super::{
         BodyKind, BodyPreview, CapturedRequest, CapturedResponse, Filters, HeaderEntry,
-        body_preview, is_api_like, serialize_headers,
+        body_preview, compact_body_summary, compact_operation_label, is_api_like,
+        serialize_headers,
     };
 
     #[test]
@@ -852,6 +923,73 @@ mod tests {
         };
 
         assert!(!is_api_like(&request, &response));
+    }
+
+    #[test]
+    fn compact_operation_label_prefers_trpc_procedure_name() {
+        let request = CapturedRequest {
+            timestamp_ms: 0,
+            method: "GET".into(),
+            url: "https://api.diceblox.com/trpc/config.get?batch=1".into(),
+            host: "api.diceblox.com".into(),
+            version: "HTTP/1.1".into(),
+            headers: Vec::new(),
+            focus_headers: Vec::new(),
+            body: empty_body_preview(),
+            is_connect: false,
+            interaction: None,
+        };
+
+        assert_eq!(compact_operation_label(&request), "config.get");
+    }
+
+    #[test]
+    fn compact_body_summary_collapses_json_keys() {
+        let summary = compact_body_summary(&BodyPreview {
+            kind: BodyKind::Json,
+            preview: "{\n  \"result\": {},\n  \"meta\": {},\n  \"extra\": {},\n  \"ignored\": {}\n}".into(),
+            original_bytes: 0,
+            decoded_bytes: 0,
+            truncated: false,
+            encoding: None,
+        });
+
+        assert_eq!(summary, "{extra,ignored,meta}");
+    }
+
+    #[test]
+    fn api_like_heuristic_matches_trpc_gets() {
+        let request = CapturedRequest {
+            timestamp_ms: 0,
+            method: "GET".into(),
+            url: "https://api.diceblox.com/trpc/config.get?batch=1".into(),
+            host: "api.diceblox.com".into(),
+            version: "HTTP/1.1".into(),
+            headers: vec![HeaderEntry {
+                name: "accept".into(),
+                value: "application/json".into(),
+            }],
+            focus_headers: Vec::new(),
+            body: empty_body_preview(),
+            is_connect: false,
+            interaction: None,
+        };
+
+        let response = CapturedResponse {
+            timestamp_ms: 0,
+            request_method: request.method.clone(),
+            request_url: request.url.clone(),
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![HeaderEntry {
+                name: "content-type".into(),
+                value: "application/json".into(),
+            }],
+            focus_headers: Vec::new(),
+            body: empty_body_preview(),
+        };
+
+        assert!(is_api_like(&request, &response));
     }
 
     fn empty_body_preview() -> BodyPreview {
