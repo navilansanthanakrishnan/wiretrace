@@ -459,18 +459,76 @@ fn print_focused_flow(request: &CapturedRequest, response: &CapturedResponse) {
 
 fn compact_operation_label(request: &CapturedRequest) -> String {
     if let Ok(url) = Url::parse(&request.url) {
+        let host = url.host_str().unwrap_or(&request.host);
         let path = url.path().trim_end_matches('/');
 
         if let Some(proc_name) = path.strip_prefix("/trpc/") {
-            return proc_name.to_string();
+            return format!("{host}/trpc/{proc_name}");
         }
 
-        if let Some(last) = path.rsplit('/').find(|segment| !segment.is_empty()) {
-            return last.to_string();
+        let normalized_path = normalize_path(path);
+        if !normalized_path.is_empty() {
+            return format!("{host}{normalized_path}");
         }
     }
 
     request.host.clone()
+}
+
+fn normalize_path(path: &str) -> String {
+    let normalized_segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(normalize_path_segment)
+        .collect::<Vec<_>>();
+
+    if normalized_segments.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", normalized_segments.join("/"))
+    }
+}
+
+fn normalize_path_segment(segment: &str) -> String {
+    if is_identifier_like_segment(segment) {
+        ":id".to_string()
+    } else {
+        segment.to_string()
+    }
+}
+
+fn is_identifier_like_segment(segment: &str) -> bool {
+    is_long_numeric_segment(segment)
+        || is_uuid_like_segment(segment)
+        || is_hex_identifier_segment(segment)
+}
+
+fn is_long_numeric_segment(segment: &str) -> bool {
+    segment.len() >= 6 && segment.chars().all(|char| char.is_ascii_digit())
+}
+
+fn is_uuid_like_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+
+    for (index, byte) in bytes.iter().enumerate() {
+        let is_hyphen = matches!(index, 8 | 13 | 18 | 23);
+        if is_hyphen {
+            if *byte != b'-' {
+                return false;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn is_hex_identifier_segment(segment: &str) -> bool {
+    matches!(segment.len(), 16..=64) && segment.chars().all(|char| char.is_ascii_hexdigit())
 }
 
 fn compact_body_summary(body: &BodyPreview) -> String {
@@ -940,7 +998,31 @@ mod tests {
             interaction: None,
         };
 
-        assert_eq!(compact_operation_label(&request), "config.get");
+        assert_eq!(
+            compact_operation_label(&request),
+            "api.diceblox.com/trpc/config.get"
+        );
+    }
+
+    #[test]
+    fn compact_operation_label_keeps_host_and_normalized_path() {
+        let request = CapturedRequest {
+            timestamp_ms: 0,
+            method: "POST".into(),
+            url: "https://discord.com/api/v9/channels/1486087030302703719/messages".into(),
+            host: "discord.com".into(),
+            version: "HTTP/1.1".into(),
+            headers: Vec::new(),
+            focus_headers: Vec::new(),
+            body: empty_body_preview(),
+            is_connect: false,
+            interaction: None,
+        };
+
+        assert_eq!(
+            compact_operation_label(&request),
+            "discord.com/api/v9/channels/:id/messages"
+        );
     }
 
     #[test]
