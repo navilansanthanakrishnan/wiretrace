@@ -8,17 +8,19 @@ use tempfile::TempDir;
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::app::AppPaths;
 use crate::cli::ChromeCommand;
 use crate::proxy;
+use crate::shutdown;
 
 const DEFAULT_CHROME_PATHS: &[&str] = &[
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ];
+const FORCE_SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
     proxy::ensure_listen_available(command.proxy.listen)?;
@@ -34,6 +36,7 @@ pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
     }
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let mut shutdown_tx = Some(shutdown_tx);
     let proxy_command = command.proxy.clone();
     let mut proxy_task = tokio::spawn(async move {
         proxy::run_with_shutdown(&proxy_paths, proxy_command, async move {
@@ -60,7 +63,7 @@ pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
         status = child.wait() => SessionOutcome::ChromeExited(
             status.context("failed waiting for Chrome process")?
         ),
-        _ = tokio::signal::ctrl_c() => SessionOutcome::Interrupted,
+        signal = shutdown::wait_for_shutdown_signal() => SessionOutcome::Interrupted(signal?),
     };
 
     match outcome {
@@ -69,21 +72,22 @@ pub async fn run(paths: &AppPaths, command: ChromeCommand) -> Result<()> {
             result?;
         }
         SessionOutcome::ChromeExited(status) => {
-            let _ = shutdown_tx.send(());
-            proxy_task
-                .await
-                .context("proxy task join failure after Chrome exit")??;
+            if let Some(tx) = shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            finalize_proxy_shutdown(&mut proxy_task).await?;
 
             if !status.success() {
                 bail!("Chrome exited with status {status}");
             }
         }
-        SessionOutcome::Interrupted => {
+        SessionOutcome::Interrupted(signal_name) => {
+            eprintln!("received {signal_name}, stopping Chrome session");
             terminate_child(&mut child).await?;
-            let _ = shutdown_tx.send(());
-            proxy_task
-                .await
-                .context("proxy task join failure after interrupt")??;
+            if let Some(tx) = shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            finalize_proxy_shutdown(&mut proxy_task).await?;
         }
     }
 
@@ -147,7 +151,7 @@ async fn terminate_child(child: &mut Child) -> Result<()> {
 enum SessionOutcome {
     Proxy(Result<()>),
     ChromeExited(ExitStatus),
-    Interrupted,
+    Interrupted(&'static str),
 }
 
 enum ManagedProfileDir {
@@ -195,4 +199,24 @@ async fn wait_for_proxy(listen: std::net::SocketAddr) -> Result<()> {
     }
 
     bail!("proxy did not become ready on {listen}")
+}
+
+async fn finalize_proxy_shutdown(
+    proxy_task: &mut tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
+    match timeout(FORCE_SHUTDOWN_WAIT, &mut *proxy_task).await {
+        Ok(join_result) => {
+            join_result.context("proxy task join failure during shutdown")??;
+        }
+        Err(_) => {
+            eprintln!(
+                "proxy shutdown exceeded {}s; aborting proxy task",
+                FORCE_SHUTDOWN_WAIT.as_secs()
+            );
+            proxy_task.abort();
+            let _ = proxy_task.await;
+        }
+    }
+
+    Ok(())
 }

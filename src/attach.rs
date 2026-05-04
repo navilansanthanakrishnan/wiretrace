@@ -1,9 +1,14 @@
 use anyhow::Result;
+use tokio::sync::oneshot;
+use tokio::time::{Duration, timeout};
 
 use crate::app::AppPaths;
 use crate::cli::AttachCommand;
 use crate::proxy;
+use crate::shutdown;
 use crate::system_proxy::{self, ProxySnapshot};
+
+const FORCE_SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 pub async fn run(paths: &AppPaths, command: AttachCommand) -> Result<()> {
     proxy::ensure_listen_available(command.proxy.listen)?;
@@ -12,16 +17,66 @@ pub async fn run(paths: &AppPaths, command: AttachCommand) -> Result<()> {
     system_proxy::enable_local_proxy(&command.service, command.proxy.listen).await?;
     let mut restore_guard =
         ProxyRestoreGuard::new(command.service.clone(), snapshot, command.leave_enabled);
+    let proxy_paths = paths.clone();
+    let proxy_command = command.proxy.clone();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let mut shutdown_tx = Some(shutdown_tx);
 
     println!("attached system proxy on service {}", command.service);
     println!("existing apps should use the proxy for new requests after reload or navigation");
     println!("press Ctrl+C to stop and restore the previous proxy settings\n");
 
-    let result = proxy::run(paths, command.proxy).await;
+    let mut proxy_task = tokio::spawn(async move {
+        proxy::run_with_shutdown(&proxy_paths, proxy_command, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
 
-    restore_guard.restore_async().await;
+    let outcome = tokio::select! {
+        result = &mut proxy_task => AttachOutcome::ProxyFinished(
+            result.expect("proxy task join failure")
+        ),
+        signal = shutdown::wait_for_shutdown_signal() => AttachOutcome::ShutdownSignal(
+            signal?
+        ),
+    };
 
-    result
+    match outcome {
+        AttachOutcome::ProxyFinished(result) => {
+            restore_guard.restore_async().await;
+            result
+        }
+        AttachOutcome::ShutdownSignal(signal_name) => {
+            eprintln!("received {signal_name}, restoring proxy settings");
+            restore_guard.restore_async().await;
+
+            if let Some(tx) = shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+
+            match timeout(FORCE_SHUTDOWN_WAIT, &mut proxy_task).await {
+                Ok(join_result) => {
+                    join_result.expect("proxy task join failure during shutdown")?;
+                }
+                Err(_) => {
+                    eprintln!(
+                        "proxy shutdown exceeded {}s; aborting proxy task",
+                        FORCE_SHUTDOWN_WAIT.as_secs()
+                    );
+                    proxy_task.abort();
+                    let _ = proxy_task.await;
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+enum AttachOutcome {
+    ProxyFinished(Result<()>),
+    ShutdownSignal(&'static str),
 }
 
 struct ProxyRestoreGuard {

@@ -9,13 +9,14 @@ use hudsucker::rustls::crypto::aws_lc_rs;
 use crate::app::AppPaths;
 use crate::cli::{InteractionMode, ProxyCommand};
 use crate::interaction::InteractionCapture;
+use crate::shutdown;
 
 use super::authority::CertificateAuthorityPaths;
 use super::capture::{CaptureConfig, CaptureHandler, Filters};
 
 pub async fn run(paths: &AppPaths, command: ProxyCommand) -> Result<()> {
     run_with_shutdown(paths, command, async {
-        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown::wait_for_shutdown_signal().await;
     })
     .await
 }

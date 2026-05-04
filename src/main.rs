@@ -7,6 +7,7 @@ mod interaction;
 mod local_ca;
 mod logging;
 mod proxy;
+mod shutdown;
 mod system_proxy;
 
 use anyhow::Result;
