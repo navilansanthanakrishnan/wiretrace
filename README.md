@@ -1,188 +1,175 @@
 # agent-mcp-b
 
-## Goal
-  eventual goal is to allow custom MCPs built or workflows, automatically through a multi agent system and also allowing an agent to use this tool as a way to automate interections on websites,apps etc instead of interecting through UI or dom
-`agent-mcp-b` is a terminal-first HTTP(S) interception system written in Rust. It is designed to capture application-layer traffic in a way that is explicit, inspectable, and production-shaped rather than script-like.
+`agent-mcp-b` is a Rust-based local protocol observation runtime for turning software usage into structured network workflows.
 
-At a high level, the tool runs a local man-in-the-middle proxy, terminates outbound TLS with a locally generated certificate authority, forwards requests upstream, and emits structured request/response captures to the terminal. It supports two routing models on macOS:
+It has three operating layers:
 
-- managed browser launch, where Chrome is started with explicit proxy flags
-- managed browser-deep launch, where Chrome/Chromium is started with the DevTools Protocol for direct interaction-to-network attribution
-- existing-app attachment, where the macOS system web and secure web proxies are temporarily pointed at the local listener
+- HTTP(S) interception for desktop and browser traffic routed through a local proxy
+- Chromium/CDP instrumentation for high-accuracy browser interaction-to-request attribution
+- Workflow recording and analysis over the captured event stream, with a localhost UI and optional OpenAI-backed automation synthesis
 
-The intent is to make network workflows legible. Instead of watching a UI and guessing what happened, the tool exposes the underlying HTTP exchange: method, URL, headers, request body, response status, response headers, and decoded response body.
+The current build is targeted at:
 
-## What It Does
+- existing macOS apps that honor system proxy settings
+- managed Chrome/Chromium sessions
+- workflow capture, normalization, context-map generation, and automation scaffolding
 
-`agent-mcp-b` currently provides:
-
-- local HTTP interception
-- local HTTPS interception via a persisted root CA
-- per-host leaf certificate generation at proxy time
-- request/response capture with decoded body previews
-- output filtering by host substring, URL substring, and method
-- focused API-style output for high-signal backend traffic
-- managed Chrome launch through the proxy
-- macOS system-proxy attachment for already-open apps that honor proxy settings
-
-## How It Works
-
-The system is built around a local proxy runtime.
-
-For HTTP traffic:
-
-1. the client sends plaintext HTTP to the local proxy
-2. the proxy captures the request
-3. the proxy forwards the request upstream
-4. the upstream response is captured and returned to the client
-
-For HTTPS traffic:
-
-1. the client opens a `CONNECT host:443` tunnel to the local proxy
-2. the proxy generates or reuses a host-specific leaf certificate signed by the local root CA
-3. the client establishes TLS with the local proxy instead of directly with the origin
-4. the proxy establishes its own outbound TLS connection to the real origin
-5. request and response bodies are available in plaintext inside the proxy
-6. the proxy forwards the response back to the client
-
-This means the tool is not scraping rendered DOM state. It is observing the underlying application protocol exchange after proxy routing has been established.
+It is not yet a transparent packet interceptor and it does not bypass certificate pinning.
 
 ## Architecture
 
-The codebase is intentionally split into a few clear layers:
+The system is split into four main subsystems.
 
-- control plane: CLI parsing, subcommand dispatch, runtime paths, logging
-- routing layer: managed Chrome launch or macOS proxy attachment
-- transport layer: local HTTP(S) proxy runtime
-- trust layer: root CA persistence and host certificate generation
-- capture layer: request/response buffering, filtering, decoding, redaction, and output formatting
+### 1. Proxy and Capture
 
-The important modules are:
+The proxy runtime terminates outbound HTTP(S), forwards requests upstream, and captures the application-layer exchange.
 
-- `src/main.rs`: program entrypoint and subcommand dispatch
-- `src/cli.rs`: CLI surface and shared command configuration
-- `src/app.rs`: persistent runtime directories for certs and logs
-- `src/chrome.rs`: managed Chrome session lifecycle
-- `src/attach.rs`: macOS system proxy attachment flow
-- `src/system_proxy.rs`: `networksetup` integration for reading, setting, and restoring proxy state
-- `src/local_ca.rs`: root CA trust management and diagnostics
-- `src/proxy/runtime.rs`: proxy bootstrap and lifecycle
-- `src/proxy/authority.rs`: CA materialization and per-host TLS certificate generation
-- `src/proxy/capture.rs`: interception logic, filtering, body decoding, redaction, and terminal output
+- `src/proxy/runtime.rs`
+  boots the local proxy and binds lifecycle/shutdown handling
+- `src/proxy/authority.rs`
+  persists the local CA and generates per-host leaf certificates for MITM TLS
+- `src/proxy/capture.rs`
+  buffers requests/responses, decodes compressed bodies, redacts or preserves sensitive material depending on flags, and renders output in `focused`, `simple`, `pretty`, or `json`
+- `src/local_ca.rs`
+  manages macOS CA trust installation and diagnostics
 
-## TLS and Trust Model
+For HTTPS, the runtime establishes two TLS sessions:
 
-HTTPS interception depends on a locally trusted root CA.
+- client -> local proxy
+- local proxy -> origin
 
-On first use, the tool creates and persists:
+That gives the proxy plaintext visibility into the HTTP request/response while preserving normal upstream connectivity.
 
-- a root CA certificate
-- a corresponding private key
+### 2. Routing Modes
 
-Those files are stored under the app runtime directory:
+Traffic reaches the runtime in three different ways.
+
+- `attach`
+  points macOS web and secure web proxies at the local listener using `networksetup`
+- `chrome`
+  launches a managed Chrome session with explicit proxy flags
+- `browser-deep`
+  launches a managed Chrome/Chromium session with the Chrome DevTools Protocol enabled, injects DOM listeners, and correlates actual page interactions to network requests
+
+Relevant files:
+
+- `src/attach.rs`
+- `src/chrome.rs`
+- `src/browser_deep.rs`
+- `src/system_proxy.rs`
+- `src/shutdown.rs`
+
+### 3. Interaction Attribution
+
+There are two interaction models in the codebase.
+
+- proxy interaction mode (`manual` / `auto`)
+  uses terminal arming or macOS global input hooks to correlate a request burst with a recent interaction window
+- browser-deep attribution
+  uses CDP `Runtime` + `Network` events and page-side listeners for `click`, `submit`, and `keydown`
+
+Browser-deep mode is the most accurate path for websites and Chromium-based apps because it attributes requests inside the browser runtime instead of inferring them only from timing.
+
+Relevant file:
+
+- `src/interaction.rs`
+
+### 4. Workflow Recording and Analysis
+
+The workflow system is a server-backed orchestration layer on top of capture.
+
+It records raw events to disk, normalizes them into operation-level events, builds a context map, then optionally sends the normalized workflow to an OpenAI Responses API backend for higher-level analysis and automation generation.
+
+Relevant files:
+
+- `src/workflow/server.rs`
+  localhost API and browser UI
+- `src/workflow/recorder.rs`
+  spawns and supervises recorder child processes, normalizes their output, and builds context maps
+- `src/workflow/store.rs`
+  persistent workflow session storage
+- `src/workflow/types.rs`
+  workflow, context-map, and automation schemas
+- `src/workflow/llm.rs`
+  OpenAI Responses API integration plus fallback generation when no API key is configured
+
+## Workflow Studio
+
+Workflow Studio is the localhost control plane for record -> stop -> analyze -> automate.
+
+When the server is running:
+
+- `POST /api/recordings/begin`
+  starts a workflow session
+- `POST /api/recordings/stop`
+  stops capture, normalizes events, and materializes a context map
+- `GET /api/sessions`
+  lists sessions
+- `GET /api/sessions/{session_id}`
+  returns session metadata plus the generated context map
+- `POST /api/sessions/{session_id}/ask`
+  sends a user prompt plus the recorded context to the automation generation path
+
+The UI served at `/` exposes the same flow:
+
+- begin recording
+- stop and analyze
+- inspect the generated context map
+- ask for an automation
+
+## OpenAI Backend
+
+The workflow analysis path uses the OpenAI Responses API when an API key is available.
+
+Environment variables:
+
+- `OPENAI_API_KEY`
+  required for live LLM analysis/generation
+- `OPENAI_MODEL`
+  optional, defaults to `gpt-5`
+- `OPENAI_BASE_URL`
+  optional, defaults to `https://api.openai.com/v1`
+
+If `OPENAI_API_KEY` is not set:
+
+- workflow recording still works
+- context-map generation still works
+- `workflow ask` falls back to a deterministic `automation-plan.md` generator instead of calling the API
+
+## Commands
+
+### Runtime Paths
 
 ```bash
 cargo run -- paths
 ```
 
-At request time, the proxy generates a leaf certificate for the target host, for example `discord.com`, signed by the local root CA. The client will only accept that leaf certificate if the local root CA is trusted by the operating system or client runtime.
-
-On macOS, install trust with:
-
-```bash
-cargo run -- ca trust
-```
-
-Verify trust state with:
+### CA Trust
 
 ```bash
 cargo run -- ca status
+cargo run -- ca trust
 ```
 
-The important line is:
+### Proxy Capture
 
-```text
-user_trust_contains_ca=true
+Run the proxy directly:
+
+```bash
+cargo run -- proxy --listen 127.0.0.1:8787 --output focused
 ```
 
-That indicates the CA is present in the user trust domain that Chrome consumes on macOS. After changing trust settings, fully quit and reopen Chrome before testing HSTS sites such as `discord.com`.
+Attach existing macOS apps that honor the system proxy:
 
-## Capture Model
+```bash
+cargo run -- attach \
+  --listen 127.0.0.1:8787 \
+  --service Wi-Fi \
+  --host-contains discord.com \
+  --output pretty
+```
 
-The proxy captures both sides of the exchange:
-
-- request metadata
-- request headers
-- request body
-- response metadata
-- response headers
-- response body
-
-Bodies are buffered, decoded when compressed, classified, and then rendered as:
-
-- JSON, if valid JSON
-- text, if the content looks textual
-- binary hex preview otherwise
-
-Sensitive headers are redacted before output. The current redaction list includes:
-
-- `authorization`
-- `cookie`
-- `set-cookie`
-- `x-super-properties`
-
-## Output Modes
-
-The proxy exposes three output modes.
-
-`focused`
-- default mode
-- prints only higher-signal API-like flows
-- suppresses most browser noise such as ordinary page asset fetches
-
-`simple`
-- prints one compact line per matched flow
-- useful when you want method + operation name + tiny payload summary without header/body noise
-
-`pretty`
-- prints verbose request and response blocks
-- useful for manual debugging
-
-`json`
-- emits structured JSON-line events
-- useful when another tool will consume the capture stream
-
-## Browser-Deep Mode
-
-`browser-deep` is separate from the proxy path.
-
-Instead of inferring interactions from global input timing, it launches a managed Chrome/Chromium session with the Chrome DevTools Protocol enabled, injects DOM event listeners into the page, and subscribes to browser-native network events. That allows the tool to attribute requests to concrete browser interactions such as:
-
-- clicking a button
-- pressing `Enter` in a form or contenteditable field
-- submitting a form
-
-The important distinction is:
-
-- proxy mode answers: `what traffic happened?`
-- browser-deep mode answers: `which request did this browser interaction trigger?`
-
-At startup the tool:
-
-- launches Chrome/Chromium with `--remote-debugging-port`
-- discovers the active page target through the DevTools HTTP endpoint
-- attaches to that page's WebSocket debugger target
-- enables `Page`, `Runtime`, `Debugger`, and `Network`
-- injects an interaction binding and DOM listeners for `click`, `submit`, and `keydown`
-- waits for matching `Network.*` events and attributes them to recent page interactions
-
-This is the highest-accuracy path currently available in the codebase for websites and Chromium-based apps.
-
-## Interaction-Scoped Capture
-
-The proxy can run in two interaction-scoped modes.
-
-Manual mode:
+Managed Chrome through the proxy:
 
 ```bash
 cargo run -- chrome \
@@ -190,97 +177,10 @@ cargo run -- chrome \
   --open https://discord.com \
   --host-contains discord.com \
   --url-contains /api/ \
-  --interaction-mode manual
+  --output focused
 ```
 
-Automatic mode:
-
-```bash
-cargo run -- attach \
-  --listen 127.0.0.1:8787 \
-  --service Wi-Fi \
-  --host-contains discord.com \
-  --url-contains /api/ \
-  --interaction-mode auto
-```
-
-In both modes, the proxy still owns the transport path, but it only emits captures for requests associated with an interaction session instead of every matching request.
-
-Manual mode opens an interaction session when you press `Enter` in the terminal. Auto mode opens an interaction session from a macOS global input hook when it sees a mouse press or keyboard interaction, then keeps the session alive across the resulting request cascade until network idle or the session hard deadline is reached.
-
-Auto mode is the most accurate cross-app path currently available in this codebase, but it is still an approximation of causality. It correlates UI input timing with network bursts; it does not yet inspect each app’s internal event graph. On macOS, Terminal must have Accessibility permission for the global input hook to work.
-
-## Commands
-
-### Print Runtime Paths
-
-```bash
-cargo run -- paths
-```
-
-### Inspect or Trust the Local CA
-
-```bash
-cargo run -- ca status
-cargo run -- ca trust
-```
-
-### Run the Proxy Directly
-
-```bash
-cargo run -- proxy --listen 127.0.0.1:8787
-```
-
-You can verify plain routing with a direct client such as `curl`:
-
-```bash
-curl --proxy http://127.0.0.1:8787 http://example.com
-curl --proxy http://127.0.0.1:8787 https://example.com
-```
-
-### Launch a Managed Chrome Session
-
-```bash
-cargo run -- chrome --listen 127.0.0.1:8787 --open https://example.com
-```
-
-This command:
-
-- starts the proxy in-process
-- waits for the listener to become ready
-- launches Chrome with explicit proxy flags
-- uses an isolated profile by default
-- tears the session down when Chrome exits or the command is interrupted
-
-For first-run debugging before the CA is trusted, you can temporarily disable browser certificate enforcement:
-
-```bash
-cargo run -- chrome \
-  --listen 127.0.0.1:8787 \
-  --open https://example.com \
-  --insecure-ignore-cert-errors
-```
-
-That flag is a bootstrap/debug path, not the normal operating mode.
-
-### Launch a Browser-Deep Session
-
-```bash
-cargo run -- browser-deep \
-  --open https://discord.com/channels/@me \
-  --host-contains discord.com \
-  --url-contains /api/ \
-  --output simple
-```
-
-Typical output:
-
-```text
-[interaction #7] keydown div[contenteditable=true] @ discord.com/channels/@me
-  POST (discord.com/api/v9/channels/:id/messages) {attachments,author,channel_id} [200]
-```
-
-Use `--user-data-dir` if you want a persistent logged-in browser profile:
+High-accuracy browser attribution via CDP:
 
 ```bash
 cargo run -- browser-deep \
@@ -291,99 +191,127 @@ cargo run -- browser-deep \
   --output simple
 ```
 
-`browser-deep` currently targets managed Chrome/Chromium sessions. Chromium-based executables that support the same remote debugging flags can also be used via `--chrome-path`.
+### Workflow Studio
 
-### Attach Already-Open macOS Apps
-
-```bash
-cargo run -- attach --listen 127.0.0.1:8787 --service Wi-Fi
-```
-
-This command:
-
-- snapshots the current macOS web and secure web proxy settings
-- points both settings at the local proxy
-- starts the local proxy
-- restores the original settings when the process exits
-
-Apps must make new requests after attachment to be captured. In practice that usually means reloading the page, navigating again, or restarting the app.
-
-## Filtering
-
-Capture output can be constrained with:
-
-- `--host-contains`
-- `--url-contains`
-- `--methods`
-- `--allow-sensitive-output` to disable redaction of auth headers and sensitive JSON fields when you explicitly need raw cookies/tokens
-
-Example:
+Start the localhost server:
 
 ```bash
-cargo run -- chrome \
-  --listen 127.0.0.1:8787 \
-  --open https://discord.com \
-  --host-contains discord.com \
-  --url-contains /api/
+cargo run -- workflow serve --listen 127.0.0.1:4317
 ```
 
-This is typically the cleanest way to observe Discord-style application traffic without seeing every unrelated browser request.
-
-## Operational Notes
-
-If you see:
-
-```text
-listen address 127.0.0.1:8787 is already in use
-```
-
-another process is already bound to that port. Stop the existing process or choose a different `--listen` value.
-
-If HTTPS sites show a privacy error:
-
-- confirm `cargo run -- ca status` reports `user_trust_contains_ca=true`
-- fully quit and reopen Chrome
-- ensure the app is actually routed through the proxy
-
-If `attach` mode appears to do nothing:
-
-- the app may not honor macOS system proxy settings
-- the app may need to be reloaded or restarted
-- the target traffic may be certificate pinned or may not be HTTP(S)
-
-## Current Limitations
-
-This project is intentionally narrow right now. It is not yet:
-
-- a transparent system-wide packet interceptor
-- a certificate pinning bypass system
-- a process-aware traffic attribution engine
-- a request replay engine
-- a workflow extraction engine
-- a long-term capture persistence or indexing system
-
-It works best today for:
-
-- browsers
-- Electron apps
-- desktop software that honors system proxy settings
-- standard HTTP/HTTPS workflows without certificate pinning
-
-## Development
-
-Build and test with:
+Start a desktop workflow recording:
 
 ```bash
-cargo check
+cargo run -- workflow begin \
+  --server 127.0.0.1:4317 \
+  --mode desktop \
+  --name "discord-session"
+```
+
+Start a browser-deep workflow recording:
+
+```bash
+cargo run -- workflow begin \
+  --server 127.0.0.1:4317 \
+  --mode browser_deep \
+  --open https://discord.com/channels/@me \
+  --user-data-dir /tmp/agent-mcp-b-discord-profile \
+  --name "discord-message-send"
+```
+
+Stop the active workflow:
+
+```bash
+cargo run -- workflow stop --server 127.0.0.1:4317
+```
+
+Inspect server status:
+
+```bash
+cargo run -- workflow status --server 127.0.0.1:4317
+```
+
+Ask the automation generator to synthesize an automation plan:
+
+```bash
+cargo run -- workflow ask \
+  --server 127.0.0.1:4317 \
+  --session-id wf-123 \
+  "Build an automation that replays the message send operation with a configurable payload."
+```
+
+Then open:
+
+- [http://127.0.0.1:4317/](http://127.0.0.1:4317/)
+
+## Data Model
+
+Each workflow session stores:
+
+- `session.json`
+  lifecycle metadata
+- `raw-events.jsonl`
+  recorder child-process event stream
+- `normalized-events.json`
+  normalized request/interaction records
+- `context-map.json`
+  summarized domains, operations, reads, writes, and interaction-to-operation edges
+- `generated/`
+  generated automation artifacts
+
+The workflow context map captures:
+
+- domains touched by the workflow
+- operation signatures such as `POST discord.com/api/v9/channels/:id/messages`
+- request/response summaries
+- auth material signals like `authorization`, `cookie`, or `set-cookie`
+- interaction edges showing which click/keydown likely triggered which operations
+- optional LLM-generated analysis
+
+## Testing and Verification
+
+Unit and integration checks:
+
+```bash
 cargo test
-./scripts/smoke-eval-sites.sh
+cargo check
 ```
 
-The project currently uses:
+Proxy smoke matrix:
 
-- `tokio` for async runtime and process orchestration
-- `hudsucker` for proxy interception
-- `clap` for CLI parsing
-- `serde` and `serde_json` for structured output
-- `rcgen` and OpenSSL-backed certificate construction for the local CA and leaf cert pipeline
-- `brotli` and `flate2` for compressed body decoding
+```bash
+bash ./scripts/smoke-eval-sites.sh
+```
+
+Workflow end-to-end eval:
+
+```bash
+bash ./scripts/workflow-e2e.sh
+```
+
+The workflow e2e script verifies:
+
+- workflow server startup
+- localhost UI rendering
+- browser-deep recording against a local fixture page
+- raw event capture
+- context-map generation
+- automation generation output
+
+## Operational Limits
+
+Current limits are explicit:
+
+- `desktop` workflow mode is only as broad as the system proxy path; apps that ignore the proxy will not be captured
+- apps with certificate pinning will not be transparently decrypted
+- browser-deep attribution is for managed Chromium sessions, not arbitrary native apps
+- the LLM automation layer currently generates plans and artifacts; it is not yet a full autonomous executor that patches arbitrary external systems safely on its own
+
+That said, the repo now contains the full first-pass pipeline for:
+
+- record
+- normalize
+- map
+- analyze
+- ask for an automation
+- inspect the result through a local UI

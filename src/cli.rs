@@ -32,6 +32,8 @@ pub enum Command {
     BrowserDeep(BrowserDeepCommand),
     /// Start the interception proxy and attach already-open macOS apps via the system proxy.
     Attach(AttachCommand),
+    /// Run the workflow recording and automation server, or talk to it via CLI helpers.
+    Workflow(WorkflowCommand),
     /// Install or inspect the local CA used for HTTPS interception.
     Ca(CaCommand),
     /// Print paths used by the application runtime.
@@ -246,4 +248,107 @@ pub enum InteractionMode {
     Off,
     Manual,
     Auto,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkflowCommand {
+    #[command(subcommand)]
+    pub action: WorkflowAction,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum WorkflowAction {
+    /// Start the localhost workflow server and UI.
+    Serve(WorkflowServeCommand),
+    /// Begin a desktop-wide recording session through the local server.
+    Begin(WorkflowBeginCommand),
+    /// Stop the active recording session and trigger analysis.
+    Stop(WorkflowStopCommand),
+    /// Show server and active-session status.
+    Status(WorkflowStatusCommand),
+    /// Ask the analyzer to design and generate an automation from a recorded workflow.
+    Ask(WorkflowAskCommand),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkflowServeCommand {
+    #[arg(
+        long,
+        default_value = "127.0.0.1:4317",
+        help = "Socket address for the workflow UI and API server"
+    )]
+    pub listen: SocketAddr,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkflowBeginCommand {
+    #[arg(
+        long,
+        default_value = "desktop",
+        help = "Recording mode: desktop or browser_deep"
+    )]
+    pub mode: String,
+
+    #[arg(
+        long,
+        default_value = "Wi-Fi",
+        help = "macOS network service for desktop recording mode"
+    )]
+    pub service: String,
+
+    #[arg(
+        long,
+        default_value = "https://example.com",
+        help = "Initial URL for browser_deep mode"
+    )]
+    pub open: String,
+
+    #[arg(long, help = "Persistent browser profile directory for browser_deep mode")]
+    pub user_data_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        default_value = "127.0.0.1:4317",
+        help = "Workflow server address"
+    )]
+    pub server: SocketAddr,
+
+    #[arg(long, help = "Optional human-friendly name for the recording session")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkflowStopCommand {
+    #[arg(
+        long,
+        default_value = "127.0.0.1:4317",
+        help = "Workflow server address"
+    )]
+    pub server: SocketAddr,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkflowStatusCommand {
+    #[arg(
+        long,
+        default_value = "127.0.0.1:4317",
+        help = "Workflow server address"
+    )]
+    pub server: SocketAddr,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkflowAskCommand {
+    #[arg(long, help = "Workflow session id. Defaults to the latest completed session when omitted.")]
+    pub session_id: Option<String>,
+
+    #[arg(
+        long,
+        default_value = "127.0.0.1:4317",
+        help = "Workflow server address"
+    )]
+    pub server: SocketAddr,
+
+    #[arg(help = "Automation request to generate and implement")]
+    pub prompt: String,
 }

@@ -10,6 +10,7 @@ mod logging;
 mod proxy;
 mod shutdown;
 mod system_proxy;
+mod workflow;
 
 use anyhow::Result;
 use clap::Parser;
@@ -30,11 +31,13 @@ async fn main() -> Result<()> {
         Command::Chrome(command) => commands::run_chrome(&paths, command).await?,
         Command::BrowserDeep(command) => commands::run_browser_deep(&paths, command).await?,
         Command::Attach(command) => commands::run_attach(&paths, command).await?,
+        Command::Workflow(command) => commands::run_workflow(&paths, command).await?,
         Command::Ca(command) => commands::run_ca(&paths, command).await?,
         Command::Paths => {
             println!("root={}", paths.root.display());
             println!("certs={}", paths.certs_dir.display());
             println!("logs={}", paths.logs_dir.display());
+            println!("workflows={}", paths.workflows_dir.display());
         }
     }
 
