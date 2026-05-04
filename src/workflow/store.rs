@@ -180,4 +180,31 @@ impl WorkflowStore {
         serde_json::from_slice(&content)
             .with_context(|| format!("failed to parse context map for {}", session.id))
     }
+
+    pub fn load_normalized_events(&self, session: &WorkflowSession) -> Result<Vec<NormalizedEvent>> {
+        if !session.normalized_events_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read(&session.normalized_events_path)
+            .with_context(|| format!("failed to read normalized events for {}", session.id))?;
+        serde_json::from_slice(&content)
+            .with_context(|| format!("failed to parse normalized events for {}", session.id))
+    }
+
+    pub fn load_automation(
+        &self,
+        session: &WorkflowSession,
+    ) -> Result<Option<AutomationGeneration>> {
+        let path = session.session_dir.join(AUTOMATION_FILE);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read(&path)
+            .with_context(|| format!("failed to read automation file for {}", session.id))?;
+        let automation = serde_json::from_slice(&content)
+            .with_context(|| format!("failed to parse automation file for {}", session.id))?;
+        Ok(Some(automation))
+    }
 }

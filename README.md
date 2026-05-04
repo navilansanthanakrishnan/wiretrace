@@ -7,6 +7,7 @@ It has three operating layers:
 - HTTP(S) interception for desktop and browser traffic routed through a local proxy
 - Chromium/CDP instrumentation for high-accuracy browser interaction-to-request attribution
 - Workflow recording and analysis over the captured event stream, with a localhost UI and optional OpenAI-backed automation synthesis
+- A terminal-style React/Electron Workflow Studio shell backed by the same localhost API
 
 The current build is targeted at:
 
@@ -86,7 +87,7 @@ It records raw events to disk, normalizes them into operation-level events, buil
 Relevant files:
 
 - `src/workflow/server.rs`
-  localhost API and browser UI
+  localhost API and static asset host for the compiled React UI
 - `src/workflow/recorder.rs`
   spawns and supervises recorder child processes, normalizes their output, and builds context maps
 - `src/workflow/store.rs`
@@ -94,7 +95,22 @@ Relevant files:
 - `src/workflow/types.rs`
   workflow, context-map, and automation schemas
 - `src/workflow/llm.rs`
-  OpenAI Responses API integration plus fallback generation when no API key is configured
+  OpenAI Responses API integration, Codex ChatGPT-backed execution via `codex exec`, and fallback generation when neither backend is available
+
+### 5. Workflow Studio UI
+
+The UI is a separate React application compiled with Vite and optionally wrapped by Electron.
+
+Relevant files:
+
+- `ui/src/App.jsx`
+  terminal-style workflow operator shell
+- `ui/src/styles.css`
+  monospace-first visual system
+- `ui/vite.config.js`
+  local dev server plus `/api` proxy to the Rust backend
+- `electron/main.cjs`
+  desktop shell that can spawn the Rust workflow server and load either the compiled localhost UI or the Vite dev server
 
 ## Workflow Studio
 
@@ -120,24 +136,41 @@ The UI served at `/` exposes the same flow:
 - inspect the generated context map
 - ask for an automation
 
-## OpenAI Backend
+## Model Backend
 
-The workflow analysis path uses the OpenAI Responses API when an API key is available.
+The workflow analysis path supports three backends:
+
+- `codex_chatgpt`
+  runs `codex exec` in an isolated temporary `CODEX_HOME` seeded from your local file-backed Codex `auth.json`, which lets the workflow system reuse the same ChatGPT/Codex login already present on the machine
+- `responses_api`
+  direct OpenAI Responses API access with `OPENAI_API_KEY`
+- `fallback`
+  deterministic local artifact generation when no model backend is configured
 
 Environment variables:
 
+- `WORKFLOW_LLM_BACKEND`
+  optional, one of `auto`, `codex`, `api`, or `none`
 - `OPENAI_API_KEY`
-  required for live LLM analysis/generation
+  required for `responses_api`
 - `OPENAI_MODEL`
-  optional, defaults to `gpt-5`
+  optional model override, also used by the Codex-backed path
 - `OPENAI_BASE_URL`
-  optional, defaults to `https://api.openai.com/v1`
+  optional `responses_api` base URL, defaults to `https://api.openai.com/v1`
+- `WORKFLOW_CODEX_BIN`
+  optional `codex` binary path for the Codex-backed path
+- `WORKFLOW_CODEX_AUTH_FILE`
+  optional override for the file-backed Codex auth bundle, defaults to `~/.codex/auth.json`
 
-If `OPENAI_API_KEY` is not set:
+`auto` prefers the local Codex auth bundle when it exists, then falls back to `OPENAI_API_KEY`, then to deterministic local generation.
+
+The Codex-backed mode is intentionally implemented by invoking `codex exec` rather than by reusing ChatGPT OAuth tokens directly inside this app. That keeps the auth flow inside Codex's documented refresh/persistence path instead of turning this project into a separate generic OAuth client.
+
+If neither Codex auth nor `OPENAI_API_KEY` is available:
 
 - workflow recording still works
 - context-map generation still works
-- `workflow ask` falls back to a deterministic `automation-plan.md` generator instead of calling the API
+- `workflow ask` falls back to deterministic local artifact generation instead of calling a model backend
 
 ## Commands
 
@@ -252,6 +285,32 @@ Then open:
 
 - [http://127.0.0.1:4317/](http://127.0.0.1:4317/)
 
+### React / Electron UI
+
+Install the UI toolchain:
+
+```bash
+npm install
+```
+
+Build the compiled localhost UI that `workflow serve` hosts at `/`:
+
+```bash
+npm run ui:build
+```
+
+Run the Electron shell against a Rust workflow server plus the Vite dev server:
+
+```bash
+npm run electron:dev
+```
+
+Run the Electron shell against the compiled localhost UI:
+
+```bash
+npm run electron
+```
+
 ## Data Model
 
 Each workflow session stores:
@@ -314,11 +373,11 @@ bash ./scripts/workflow-desktop-e2e.sh
 The workflow e2e script verifies:
 
 - workflow server startup
-- localhost UI rendering
+- compiled localhost UI rendering
 - browser-deep recording against a local fixture page
 - raw event capture
 - context-map generation
-- automation generation output
+- automation generation output through the active model backend
 
 ## Operational Limits
 

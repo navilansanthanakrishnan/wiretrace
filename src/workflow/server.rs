@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -10,6 +11,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
+use tower_http::services::ServeDir;
 
 use crate::app::AppPaths;
 use crate::cli::{
@@ -47,6 +49,7 @@ pub async fn run_server(paths: &AppPaths, command: WorkflowServeCommand) -> Resu
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{session_id}", get(get_session))
         .route("/api/sessions/{session_id}/ask", post(ask))
+        .nest_service("/assets", ServeDir::new(ui_dist_dir().join("assets")))
         .with_state(state);
 
     println!("workflow server listening on http://{}", command.listen);
@@ -184,6 +187,7 @@ async fn get_status(
     Ok(Json(ServerStatus {
         active_session,
         recent_sessions,
+        llm_provider: state.llm.provider_name(),
     }))
 }
 
@@ -203,7 +207,20 @@ async fn get_session(
     } else {
         None
     };
-    Ok(Json(SessionDetail { session, context_map }))
+    let normalized_events = state
+        .store
+        .load_normalized_events(&session)
+        .map_err(AppError::internal)?;
+    let automation = state
+        .store
+        .load_automation(&session)
+        .map_err(AppError::internal)?;
+    Ok(Json(SessionDetail {
+        session,
+        context_map,
+        normalized_events,
+        automation,
+    }))
 }
 
 async fn ask(
@@ -228,8 +245,16 @@ async fn ask(
     Ok(Json(automation))
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index() -> Result<Html<String>, AppError> {
+    let path = ui_dist_dir().join("index.html");
+    if path.exists() {
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(AppError::internal)?;
+        Ok(Html(content))
+    } else {
+        Ok(Html(FALLBACK_INDEX_HTML.to_string()))
+    }
 }
 
 async fn resolve_session(
@@ -281,6 +306,8 @@ async fn ensure_success(response: reqwest::Response) -> Result<()> {
 struct SessionDetail {
     session: WorkflowSession,
     context_map: Option<WorkflowContextMap>,
+    normalized_events: Vec<crate::workflow::types::NormalizedEvent>,
+    automation: Option<AutomationGeneration>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -316,168 +343,27 @@ impl IntoResponse for AppError {
     }
 }
 
-const INDEX_HTML: &str = r#"<!doctype html>
+fn ui_dist_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dist")
+}
+
+const FALLBACK_INDEX_HTML: &str = r#"<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Workflow Studio</title>
   <style>
-    :root { color-scheme: dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#2f81f7; }
-    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background: radial-gradient(circle at top, #132238, var(--bg) 45%); color:var(--text); }
-    .wrap { max-width: 1200px; margin: 0 auto; padding: 32px 20px 80px; }
-    .hero { display:flex; justify-content:space-between; gap:24px; align-items:end; margin-bottom:24px; }
-    .hero h1 { margin:0; font-size:38px; }
-    .hero p { margin:8px 0 0; color:var(--muted); max-width:680px; }
-    .grid { display:grid; grid-template-columns: 340px 1fr; gap:20px; }
-    .panel { background: rgba(22,27,34,0.9); border:1px solid var(--line); border-radius:18px; padding:18px; backdrop-filter: blur(10px); }
-    .panel h2 { margin:0 0 14px; font-size:18px; }
-    .stack { display:grid; gap:12px; }
-    label { display:grid; gap:6px; color:var(--muted); font-size:13px; }
-    input, select, textarea, button { font: inherit; border-radius:12px; border:1px solid var(--line); background:#0d1117; color:var(--text); }
-    input, select, textarea { padding:12px; }
-    textarea { min-height:140px; resize:vertical; }
-    button { padding:12px 14px; cursor:pointer; background:linear-gradient(180deg, #2f81f7, #1f6feb); border:none; }
-    button.secondary { background:#21262d; border:1px solid var(--line); }
-    .status { font-size:14px; color:var(--muted); }
-    .sessions { display:grid; gap:10px; max-height:300px; overflow:auto; }
-    .session { border:1px solid var(--line); border-radius:14px; padding:12px; cursor:pointer; }
-    .session.active { outline:2px solid var(--accent); }
-    pre { white-space: pre-wrap; overflow-wrap:anywhere; background:#0b0f14; padding:14px; border-radius:14px; border:1px solid #222; }
-    .split { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    :root { color-scheme: dark; --bg:#0a0c0e; --fg:#d7dadc; --muted:#8a9099; --line:#23272e; }
+    body { margin:0; background:var(--bg); color:var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    main { max-width: 880px; margin: 0 auto; padding: 48px 24px; }
+    pre { border:1px solid var(--line); padding:16px; overflow:auto; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="hero">
-      <div>
-        <h1>Workflow Studio</h1>
-        <p>Record proxy and browser workflows, analyze the captured graph, and synthesize concrete automation artifacts from the resulting context map.</p>
-      </div>
-      <div class="status" id="status">Loading…</div>
-    </div>
-    <div class="grid">
-      <div class="panel stack">
-        <h2>Recorder</h2>
-        <label>Mode
-          <select id="mode">
-            <option value="desktop">desktop</option>
-            <option value="browser_deep">browser_deep</option>
-          </select>
-        </label>
-        <label>Name
-          <input id="name" placeholder="discord send-message flow" />
-        </label>
-        <label>Service
-          <input id="service" value="Wi-Fi" />
-        </label>
-        <label>Open URL
-          <input id="open" value="https://example.com" />
-        </label>
-        <label>User Data Dir
-          <input id="profile" placeholder="/tmp/workflow-browser-profile" />
-        </label>
-        <label>Host Filters
-          <input id="hostFilters" placeholder="discord.com,api.example.com" />
-        </label>
-        <label>URL Filters
-          <input id="urlFilters" placeholder="/api/,/trpc/" />
-        </label>
-        <label>Method Filters
-          <input id="methodFilters" placeholder="GET,POST" />
-        </label>
-        <div class="stack">
-          <button id="begin">Begin Recording</button>
-          <button id="stop" class="secondary">Stop + Analyze</button>
-        </div>
-        <h2>Sessions</h2>
-        <div id="sessions" class="sessions"></div>
-      </div>
-      <div class="panel stack">
-        <h2>Context Map</h2>
-        <pre id="context">Select a session after recording.</pre>
-        <div class="split">
-          <div class="panel stack">
-            <h2>Ask for Automation</h2>
-            <textarea id="askPrompt" placeholder="Can you build me an automation that logs into X, opens Y, and submits Z?"></textarea>
-            <button id="ask">Generate Automation</button>
-          </div>
-          <div class="panel stack">
-            <h2>Automation Output</h2>
-            <pre id="automation">No automation generated yet.</pre>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <script>
-    let currentSessionId = null;
-    async function fetchJson(url, options) {
-      const res = await fetch(url, options);
-      const text = await res.text();
-      const data = text ? JSON.parse(text) : null;
-      if (!res.ok) throw new Error((data && data.error) || text || res.statusText);
-      return data;
-    }
-    async function refreshStatus() {
-      const data = await fetchJson('/api/status');
-      document.getElementById('status').textContent = data.active_session
-        ? `Active: ${data.active_session.name} (${data.active_session.mode})`
-        : 'Idle';
-      const sessions = document.getElementById('sessions');
-      sessions.innerHTML = '';
-      for (const session of data.recent_sessions) {
-        const el = document.createElement('div');
-        el.className = 'session' + (session.id === currentSessionId ? ' active' : '');
-        el.innerHTML = `<strong>${session.name}</strong><div>${session.mode} · ${session.status} · ${session.event_count} events</div><div>${session.id}</div>`;
-        el.onclick = () => loadSession(session.id);
-        sessions.appendChild(el);
-      }
-    }
-    async function loadSession(sessionId) {
-      currentSessionId = sessionId;
-      const data = await fetchJson(`/api/sessions/${sessionId}`);
-      document.getElementById('context').textContent = JSON.stringify(data, null, 2);
-      await refreshStatus();
-    }
-    document.getElementById('begin').onclick = async () => {
-      await fetchJson('/api/recordings/begin', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          mode: document.getElementById('mode').value,
-          name: document.getElementById('name').value || null,
-          service: document.getElementById('service').value,
-          open: document.getElementById('open').value,
-          user_data_dir: document.getElementById('profile').value || null,
-          host_contains: document.getElementById('hostFilters').value
-            ? document.getElementById('hostFilters').value.split(',').map(value => value.trim()).filter(Boolean)
-            : [],
-          url_contains: document.getElementById('urlFilters').value
-            ? document.getElementById('urlFilters').value.split(',').map(value => value.trim()).filter(Boolean)
-            : [],
-          methods: document.getElementById('methodFilters').value
-            ? document.getElementById('methodFilters').value.split(',').map(value => value.trim()).filter(Boolean)
-            : []
-        })
-      });
-      await refreshStatus();
-    };
-    document.getElementById('stop').onclick = async () => {
-      const session = await fetchJson('/api/recordings/stop', { method: 'POST' });
-      currentSessionId = session.id;
-      await loadSession(session.id);
-    };
-    document.getElementById('ask').onclick = async () => {
-      const sessionId = currentSessionId || 'latest';
-      const data = await fetchJson(`/api/sessions/${sessionId}/ask`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt: document.getElementById('askPrompt').value })
-      });
-      document.getElementById('automation').textContent = JSON.stringify(data, null, 2);
-    };
-    refreshStatus();
-  </script>
+  <main>
+    <h1>Workflow Studio UI is not built</h1>
+    <pre>Run `npm install` and `npm run ui:build`, then restart `cargo run -- workflow serve`.</pre>
+  </main>
 </body>
 </html>"#;

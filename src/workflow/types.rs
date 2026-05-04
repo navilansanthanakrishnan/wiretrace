@@ -137,4 +137,5 @@ pub struct GeneratedFile {
 pub struct ServerStatus {
     pub active_session: Option<WorkflowSession>,
     pub recent_sessions: Vec<WorkflowSession>,
+    pub llm_provider: String,
 }

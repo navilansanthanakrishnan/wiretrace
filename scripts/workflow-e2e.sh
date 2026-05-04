@@ -124,9 +124,11 @@ if not summary:
     raise SystemExit("automation summary missing")
 if not files:
     raise SystemExit("automation files missing")
-paths = {item.get("path") for item in files}
-if "automation-plan.md" not in paths:
-    raise SystemExit(f"unexpected generated file set: {paths}")
+paths = [item.get("path") for item in files]
+if not all(paths):
+    raise SystemExit(f"generated file path missing: {paths}")
+if not any((item.get("content") or "").strip() for item in files):
+    raise SystemExit("generated files were empty")
 ' || fail "automation generation validation failed"
 
 echo "workflow e2e passed for session ${SESSION_ID}"
