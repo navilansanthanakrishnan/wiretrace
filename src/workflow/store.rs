@@ -50,6 +50,7 @@ impl WorkflowStore {
             started_at_ms,
             stopped_at_ms: None,
             event_count: 0,
+            recorder_endpoint: None,
             raw_events_path: session_dir.join(RAW_EVENTS_FILE),
             normalized_events_path: session_dir.join(NORMALIZED_EVENTS_FILE),
             context_map_path: session_dir.join(CONTEXT_MAP_FILE),

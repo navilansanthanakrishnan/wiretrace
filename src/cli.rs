@@ -199,6 +199,20 @@ pub struct BrowserDeepCommand {
         help = "Requests must begin within this many milliseconds of an observed browser interaction to be attributed"
     )]
     pub interaction_window_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Capture all matching browser requests, even when no interaction attribution is available"
+    )]
+    pub record_all: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Do not redact sensitive headers in browser-deep output"
+    )]
+    pub allow_sensitive_output: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -315,6 +329,27 @@ pub struct WorkflowBeginCommand {
 
     #[arg(long, help = "Optional human-friendly name for the recording session")]
     pub name: Option<String>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Only record requests whose host contains one of these values"
+    )]
+    pub host_contains: Vec<String>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Only record requests whose URL contains one of these values"
+    )]
+    pub url_contains: Vec<String>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Only record requests whose HTTP method matches one of these values"
+    )]
+    pub methods: Vec<String>,
 }
 
 #[derive(Debug, Clone, Args)]

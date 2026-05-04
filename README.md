@@ -70,6 +70,9 @@ There are two interaction models in the codebase.
 
 Browser-deep mode is the most accurate path for websites and Chromium-based apps because it attributes requests inside the browser runtime instead of inferring them only from timing.
 
+When `browser-deep` is used directly, it remains interaction-oriented by default.
+When it is used through Workflow Studio, the recorder enables full matching-request capture so page-load, login, and follow-on API traffic are preserved even when no DOM interaction is available for attribution.
+
 Relevant file:
 
 - `src/interaction.rs`
@@ -205,6 +208,8 @@ Start a desktop workflow recording:
 cargo run -- workflow begin \
   --server 127.0.0.1:4317 \
   --mode desktop \
+  --host-contains discord.com \
+  --url-contains /api/ \
   --name "discord-session"
 ```
 
@@ -216,6 +221,9 @@ cargo run -- workflow begin \
   --mode browser_deep \
   --open https://discord.com/channels/@me \
   --user-data-dir /tmp/agent-mcp-b-discord-profile \
+  --host-contains discord.com \
+  --url-contains /api/ \
+  --methods GET,POST \
   --name "discord-message-send"
 ```
 
@@ -259,6 +267,8 @@ Each workflow session stores:
 - `generated/`
   generated automation artifacts
 
+For desktop sessions, `session.json` also records the active local recorder endpoint so test harnesses and agent tooling can drive traffic through the workflow recorder deterministically while the session is active.
+
 The workflow context map captures:
 
 - domains touched by the workflow
@@ -287,6 +297,18 @@ Workflow end-to-end eval:
 
 ```bash
 bash ./scripts/workflow-e2e.sh
+```
+
+Authenticated workflow end-to-end eval:
+
+```bash
+bash ./scripts/workflow-auth-e2e.sh
+```
+
+Desktop workflow end-to-end eval:
+
+```bash
+bash ./scripts/workflow-desktop-e2e.sh
 ```
 
 The workflow e2e script verifies:

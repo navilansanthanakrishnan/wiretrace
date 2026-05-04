@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,6 +18,7 @@ use crate::workflow::types::{
 };
 
 const CHILD_STOP_WAIT: Duration = Duration::from_secs(3);
+const RECORDER_READY_WAIT: Duration = Duration::from_secs(5);
 
 pub struct ActiveRecorder {
     pub session: WorkflowSession,
@@ -28,10 +29,7 @@ pub struct ActiveRecorder {
 
 impl ActiveRecorder {
     pub async fn stop(mut self, store: &WorkflowStore) -> Result<WorkflowSession> {
-        if self.child.id().is_some() {
-            let _ = self.child.start_kill();
-            let _ = timeout(CHILD_STOP_WAIT, self.child.wait()).await;
-        }
+        terminate_child_gracefully(&mut self.child).await;
 
         let _ = self.reader_task.await;
         let mut session = store.load_session(&self.session.id)?;
@@ -40,6 +38,25 @@ impl ActiveRecorder {
         session.status = WorkflowStatus::Recorded;
         store.save_session(&session)?;
         Ok(session)
+    }
+}
+
+async fn terminate_child_gracefully(child: &mut Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
+
+    let _ = StdCommand::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status();
+
+    match timeout(CHILD_STOP_WAIT, child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = timeout(CHILD_STOP_WAIT, child.wait()).await;
+        }
     }
 }
 
@@ -52,17 +69,21 @@ pub async fn begin_recording(
         .name
         .clone()
         .unwrap_or_else(|| format!("workflow-{}", &id[3..]));
-    let session = store.create_session(id, name, request.mode.clone(), now_ms())?;
+    let mut session = store.create_session(id, name, request.mode.clone(), now_ms())?;
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
     let mut command = Command::new(current_exe);
     command.kill_on_drop(true);
     command.stdin(Stdio::null());
     command.stderr(Stdio::piped());
     command.stdout(Stdio::piped());
+    let mut recorder_listen = None::<String>;
 
     match request.mode {
         WorkflowMode::Desktop => {
             let listen = format!("127.0.0.1:{}", pick_free_port()?);
+            session.recorder_endpoint = Some(format!("http://{listen}"));
+            store.save_session(&session)?;
+            recorder_listen = Some(listen.clone());
             command.args([
                 "attach",
                 "--listen",
@@ -73,15 +94,34 @@ pub async fn begin_recording(
                 "json",
                 "--allow-sensitive-output",
             ]);
+            for value in &request.host_contains {
+                command.arg("--host-contains").arg(value);
+            }
+            for value in &request.url_contains {
+                command.arg("--url-contains").arg(value);
+            }
+            for value in &request.methods {
+                command.arg("--methods").arg(value);
+            }
         }
         WorkflowMode::BrowserDeep => {
-            command.args([
-                "browser-deep",
-                "--open",
-                &request.open,
-                "--output",
-                "json",
-            ]);
+            let remote_debugging_port = pick_free_port()?;
+            command.arg("browser-deep");
+            command.arg("--open").arg(&request.open);
+            command.arg("--output").arg("json");
+            command.arg("--record-all");
+            command
+                .arg("--remote-debugging-port")
+                .arg(remote_debugging_port.to_string());
+            for value in &request.host_contains {
+                command.arg("--host-contains").arg(value);
+            }
+            for value in &request.url_contains {
+                command.arg("--url-contains").arg(value);
+            }
+            for value in &request.methods {
+                command.arg("--methods").arg(value);
+            }
             if let Some(user_data_dir) = request.user_data_dir.as_ref() {
                 command.arg("--user-data-dir").arg(user_data_dir);
             }
@@ -137,12 +177,37 @@ pub async fn begin_recording(
         let _ = stderr_task.await;
     });
 
-    Ok(ActiveRecorder {
+    let recorder = ActiveRecorder {
         session,
         child,
         event_count,
         reader_task,
-    })
+    };
+
+    if let Some(listen) = recorder_listen {
+        wait_for_listener(&listen).await?;
+    }
+
+    Ok(recorder)
+}
+
+async fn wait_for_listener(listen: &str) -> Result<()> {
+    let started = tokio::time::Instant::now();
+    loop {
+        match tokio::net::TcpStream::connect(listen).await {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(_) if started.elapsed() < RECORDER_READY_WAIT => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("timed out waiting for recorder listener {listen}"));
+            }
+        }
+    }
 }
 
 pub fn normalize_raw_events(lines: &[String]) -> Result<Vec<NormalizedEvent>> {
@@ -219,8 +284,8 @@ pub fn normalize_raw_events(lines: &[String]) -> Result<Vec<NormalizedEvent>> {
                 status: value["status"].as_u64().map(|status| status as u16),
                 request_summary: value["request_summary"].as_str().map(ToOwned::to_owned),
                 response_summary: value["response_summary"].as_str().map(ToOwned::to_owned),
-                request_headers: BTreeMap::new(),
-                response_headers: BTreeMap::new(),
+                request_headers: header_entries_to_map(value.get("request_headers")),
+                response_headers: header_entries_to_map(value.get("response_headers")),
             });
         }
     }
@@ -252,7 +317,7 @@ pub fn build_context_map(
             domain.read_count += 1;
         }
 
-        for (name, value) in event
+        for (name, _value) in event
             .request_headers
             .iter()
             .chain(event.response_headers.iter())
@@ -261,7 +326,7 @@ pub fn build_context_map(
                 || name.eq_ignore_ascii_case("cookie")
                 || name.eq_ignore_ascii_case("set-cookie")
             {
-                *auth_signals.entry(format!("{name}={value}")).or_default() += 1;
+                *auth_signals.entry(name.to_ascii_lowercase()).or_default() += 1;
             }
         }
 
@@ -336,7 +401,11 @@ pub fn build_context_map(
         operations: operation_values,
         writes,
         reads,
-        auth_signals: auth_signals.into_keys().take(20).collect(),
+        auth_signals: auth_signals
+            .into_iter()
+            .map(|(name, count)| format!("{name} ({count})"))
+            .take(20)
+            .collect(),
         connection_map: connections,
         llm_analysis,
     }
@@ -344,15 +413,30 @@ pub fn build_context_map(
 
 fn header_entries_to_map(value: Option<&Value>) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    let Some(array) = value.and_then(Value::as_array) else {
+    if let Some(array) = value.and_then(Value::as_array) {
+        for item in array {
+            if let (Some(name), Some(value)) = (
+                item.get("name").and_then(Value::as_str),
+                item.get("value").and_then(Value::as_str),
+            ) {
+                map.insert(name.to_string(), value.to_string());
+            }
+        }
         return map;
-    };
-    for item in array {
-        if let (Some(name), Some(value)) = (
-            item.get("name").and_then(Value::as_str),
-            item.get("value").and_then(Value::as_str),
-        ) {
-            map.insert(name.to_string(), value.to_string());
+    }
+
+    if let Some(object) = value.and_then(Value::as_object) {
+        for (name, value) in object {
+            let rendered = match value {
+                Value::String(text) => text.clone(),
+                Value::Array(values) => values
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                other => other.to_string(),
+            };
+            map.insert(name.to_string(), rendered);
         }
     }
     map
@@ -456,6 +540,7 @@ mod tests {
             started_at_ms: 0,
             stopped_at_ms: Some(1),
             event_count: 0,
+            recorder_endpoint: None,
             session_dir: PathBuf::from("/tmp/wf-1"),
             raw_events_path: PathBuf::from("/tmp/wf-1/raw.jsonl"),
             normalized_events_path: PathBuf::from("/tmp/wf-1/norm.json"),
@@ -484,5 +569,33 @@ mod tests {
         let context = build_context_map(&sample_session(), &events, None);
         assert_eq!(context.operations.len(), 1);
         assert_eq!(context.domains[0].host, "discord.com");
+    }
+
+    #[test]
+    fn normalize_browser_deep_event_with_headers() {
+        let lines = vec![r#"{"interaction_id":1,"interaction_kind":"click","interaction_element":"button#login","method":"POST","url":"http://127.0.0.1:8012/auth/login","request_summary":"{username}","response_summary":"{ok}","request_headers":{"authorization":"<redacted>","content-type":"application/json"},"response_headers":{"set-cookie":"<redacted>"},"status":200}"#.into()];
+        let events = normalize_raw_events(&lines).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].request_headers.get("authorization").map(String::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            events[0].response_headers.get("set-cookie").map(String::as_str),
+            Some("<redacted>")
+        );
+    }
+
+    #[test]
+    fn context_map_collects_auth_signal_names() {
+        let lines = vec![
+            r#"{"interaction_id":1,"interaction_kind":"click","interaction_element":"button#login","method":"POST","url":"http://127.0.0.1:8012/auth/login","request_summary":"{username}","response_summary":"{ok}","request_headers":{"authorization":"<redacted>"},"response_headers":{"set-cookie":"<redacted>"},"status":200}"#.into(),
+            r#"{"interaction_id":1,"interaction_kind":"click","interaction_element":"button#login","method":"GET","url":"http://127.0.0.1:8012/api/private","request_summary":"{}","response_summary":"{ok,user}","request_headers":{"cookie":"<redacted>"},"response_headers":{},"status":200}"#.into(),
+        ];
+        let events = normalize_raw_events(&lines).unwrap();
+        let context = build_context_map(&sample_session(), &events, None);
+        assert!(context.auth_signals.iter().any(|value| value == "authorization (1)"));
+        assert!(context.auth_signals.iter().any(|value| value == "set-cookie (1)"));
+        assert!(context.auth_signals.iter().any(|value| value == "cookie (1)"));
     }
 }

@@ -29,6 +29,7 @@ pub struct WorkflowSession {
     pub started_at_ms: u128,
     pub stopped_at_ms: Option<u128>,
     pub event_count: usize,
+    pub recorder_endpoint: Option<String>,
     pub session_dir: PathBuf,
     pub raw_events_path: PathBuf,
     pub normalized_events_path: PathBuf,
@@ -44,6 +45,9 @@ pub struct RecordingRequest {
     pub open: String,
     pub user_data_dir: Option<PathBuf>,
     pub name: Option<String>,
+    pub host_contains: Vec<String>,
+    pub url_contains: Vec<String>,
+    pub methods: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

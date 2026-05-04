@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::Stdio;
@@ -148,6 +148,7 @@ async fn launch_chrome(
     process.arg("--no-first-run");
     process.arg("--no-default-browser-check");
     process.arg("--new-window");
+    process.arg("--no-proxy-server");
     process.arg("--disable-quic");
     process.arg(format!(
         "--remote-debugging-port={}",
@@ -438,20 +439,24 @@ struct ObservedRequest {
     request_id: String,
     method: String,
     url: String,
-    interaction_id: u64,
+    interaction_id: Option<u64>,
     request_summary: String,
+    request_headers: BTreeMap<String, String>,
+    response_headers: BTreeMap<String, String>,
     status: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct DeepFlowEvent<'a> {
-    interaction_id: u64,
-    interaction_kind: &'a str,
-    interaction_element: &'a str,
+    interaction_id: Option<u64>,
+    interaction_kind: Option<&'a str>,
+    interaction_element: Option<&'a str>,
     method: &'a str,
     url: &'a str,
     request_summary: &'a str,
     response_summary: &'a str,
+    request_headers: &'a BTreeMap<String, String>,
+    response_headers: &'a BTreeMap<String, String>,
     status: Option<u16>,
 }
 
@@ -459,6 +464,8 @@ struct InteractionTracker {
     command: BrowserDeepCommand,
     interactions: VecDeque<BrowserInteraction>,
     pending_requests: HashMap<String, ObservedRequest>,
+    pending_request_header_extras: HashMap<String, BTreeMap<String, String>>,
+    pending_response_header_extras: HashMap<String, BTreeMap<String, String>>,
     next_interaction_id: u64,
     printed_interactions: HashSet<u64>,
 }
@@ -469,6 +476,8 @@ impl InteractionTracker {
             command,
             interactions: VecDeque::new(),
             pending_requests: HashMap::new(),
+            pending_request_header_extras: HashMap::new(),
+            pending_response_header_extras: HashMap::new(),
             next_interaction_id: 0,
             printed_interactions: HashSet::new(),
         }
@@ -482,7 +491,9 @@ impl InteractionTracker {
         match method {
             "Runtime.bindingCalled" => self.handle_binding_called(event),
             "Network.requestWillBeSent" => self.handle_request_will_be_sent(event),
+            "Network.requestWillBeSentExtraInfo" => self.handle_request_extra_info(event),
             "Network.responseReceived" => self.handle_response_received(event),
+            "Network.responseReceivedExtraInfo" => self.handle_response_extra_info(event),
             "Network.loadingFinished" => self.handle_loading_finished(session, event).await,
             "Network.loadingFailed" => self.handle_loading_failed(event),
             _ => Ok(()),
@@ -548,15 +559,23 @@ impl InteractionTracker {
             .unwrap_or_else(now_ms);
         self.prune_old(request_time_ms);
 
-        let Some(interaction) = self.match_interaction(&url, request_time_ms) else {
+        let interaction_id = self.match_interaction(&url, request_time_ms).map(|interaction| interaction.id);
+        if interaction_id.is_none() && !self.command.record_all {
             return Ok(());
-        };
+        }
 
         let request_summary = request
             .get("postData")
             .and_then(Value::as_str)
             .map(|text| summarize_body(text, false))
             .unwrap_or_else(|| "{}".to_string());
+        let mut request_headers = parse_cdp_headers(
+            request.get("headers"),
+            self.command.allow_sensitive_output,
+        );
+        if let Some(extra) = self.pending_request_header_extras.remove(&request_id) {
+            request_headers.extend(extra);
+        }
 
         self.pending_requests.insert(
             request_id.clone(),
@@ -564,25 +583,77 @@ impl InteractionTracker {
                 request_id,
                 method,
                 url,
-                interaction_id: interaction.id,
+                interaction_id,
                 request_summary,
+                request_headers,
+                response_headers: BTreeMap::new(),
                 status: None,
             },
         );
         Ok(())
     }
 
+    fn handle_request_extra_info(&mut self, event: Value) -> Result<()> {
+        let params = &event["params"];
+        let request_id = params["requestId"]
+            .as_str()
+            .context("missing request extra-info request id")?
+            .to_string();
+        let headers = parse_cdp_headers(
+            params.get("headers"),
+            self.command.allow_sensitive_output,
+        );
+        if let Some(observed) = self.pending_requests.get_mut(&request_id) {
+            observed.request_headers.extend(headers);
+        } else {
+            self.pending_request_header_extras.insert(request_id, headers);
+        }
+        Ok(())
+    }
+
     fn handle_response_received(&mut self, event: Value) -> Result<()> {
-        let request_id = event["params"]["requestId"]
+        let params = &event["params"];
+        let request_id = params["requestId"]
             .as_str()
             .context("missing response request id")?;
         let Some(observed) = self.pending_requests.get_mut(request_id) else {
             return Ok(());
         };
 
-        observed.status = event["params"]["response"]["status"]
+        observed.status = params["response"]["status"]
             .as_u64()
             .map(|value| value as u16);
+        observed.response_headers.extend(parse_cdp_headers(
+            params["response"].get("headers"),
+            self.command.allow_sensitive_output,
+        ));
+        if observed.request_headers.is_empty() {
+            observed.request_headers.extend(parse_cdp_headers(
+                params["response"].get("requestHeaders"),
+                self.command.allow_sensitive_output,
+            ));
+        }
+        if let Some(extra) = self.pending_response_header_extras.remove(request_id) {
+            observed.response_headers.extend(extra);
+        }
+        Ok(())
+    }
+
+    fn handle_response_extra_info(&mut self, event: Value) -> Result<()> {
+        let params = &event["params"];
+        let request_id = params["requestId"]
+            .as_str()
+            .context("missing response extra-info request id")?
+            .to_string();
+        let headers = parse_cdp_headers(
+            params.get("headers"),
+            self.command.allow_sensitive_output,
+        );
+        if let Some(observed) = self.pending_requests.get_mut(&request_id) {
+            observed.response_headers.extend(headers);
+        } else {
+            self.pending_response_header_extras.insert(request_id, headers);
+        }
         Ok(())
     }
 
@@ -600,13 +671,23 @@ impl InteractionTracker {
     }
 
     fn handle_loading_failed(&mut self, event: Value) -> Result<()> {
-        let request_id = event["params"]["requestId"]
+        let params = &event["params"];
+        let request_id = params["requestId"]
             .as_str()
             .context("missing failed request id")?;
         let Some(observed) = self.pending_requests.remove(request_id) else {
             return Ok(());
         };
-        self.print_flow(&observed, None, "{failed}");
+        let error_text = params["errorText"].as_str().unwrap_or("failed");
+        let blocked_reason = params["blockedReason"]
+            .as_str()
+            .map(|value| format!(" blocked={value}"))
+            .unwrap_or_default();
+        self.print_flow(
+            &observed,
+            None,
+            &format!("{{failed error=\"{error_text}\"{blocked_reason}}}"),
+        );
         Ok(())
     }
 
@@ -645,15 +726,14 @@ impl InteractionTracker {
     }
 
     fn print_flow(&mut self, request: &ObservedRequest, status: Option<u16>, response_summary: &str) {
-        let Some(interaction) = self
+        let interaction = request.interaction_id.and_then(|interaction_id| self
             .interactions
             .iter()
-            .find(|interaction| interaction.id == request.interaction_id)
-        else {
-            return;
-        };
+            .find(|interaction| interaction.id == interaction_id));
 
-        if self.printed_interactions.insert(interaction.id) {
+        if let Some(interaction) = interaction
+            && self.printed_interactions.insert(interaction.id)
+        {
             println!(
                 "\n[interaction #{}] {} {} @ {}",
                 interaction.id,
@@ -684,13 +764,15 @@ impl InteractionTracker {
             }
             OutputMode::Json => {
                 let event = DeepFlowEvent {
-                    interaction_id: interaction.id,
-                    interaction_kind: &interaction.kind,
-                    interaction_element: &interaction.element,
+                    interaction_id: interaction.map(|value| value.id),
+                    interaction_kind: interaction.map(|value| value.kind.as_str()),
+                    interaction_element: interaction.map(|value| value.element.as_str()),
                     method: &request.method,
                     url: &request.url,
                     request_summary: &request.request_summary,
                     response_summary,
+                    request_headers: &request.request_headers,
+                    response_headers: &request.response_headers,
                     status,
                 };
                 println!("{}", serde_json::to_string(&event).unwrap_or_default());
@@ -729,6 +811,49 @@ fn compact_page_label(page_url: &str, title: &str) -> String {
         url_label
     } else {
         format!("{url_label} \"{}\"", title.replace('\n', " "))
+    }
+}
+
+fn parse_cdp_headers(
+    value: Option<&Value>,
+    allow_sensitive_output: bool,
+) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+    let Some(object) = value.and_then(Value::as_object) else {
+        return headers;
+    };
+
+    for (name, raw_value) in object {
+        let rendered = match raw_value {
+            Value::String(text) => text.clone(),
+            Value::Array(values) => values
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            other => other.to_string(),
+        };
+        headers.insert(
+            name.to_string(),
+            sanitize_header_value(name, &rendered, allow_sensitive_output),
+        );
+    }
+
+    headers
+}
+
+fn sanitize_header_value(name: &str, value: &str, allow_sensitive_output: bool) -> String {
+    if allow_sensitive_output {
+        return value.to_string();
+    }
+
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+    ) {
+        "<redacted>".to_string()
+    } else {
+        value.to_string()
     }
 }
 

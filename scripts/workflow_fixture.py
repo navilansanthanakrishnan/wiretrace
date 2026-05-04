@@ -15,6 +15,26 @@ INDEX_HTML = """<!doctype html>
   <h1>Workflow Fixture</h1>
   <button id="go">Send workflow request</button>
   <script>
+    function autoTrigger(buttonId) {
+      let attempts = 0;
+      const interval = setInterval(() => {
+        attempts += 1;
+        if (window.__agentMcpBDeepInstalled) {
+          clearInterval(interval);
+          setTimeout(() => {
+            document.getElementById(buttonId).click();
+          }, 150);
+          return;
+        }
+        if (attempts >= 15) {
+          clearInterval(interval);
+          setTimeout(() => {
+            document.getElementById(buttonId).click();
+          }, 150);
+        }
+      }, 100);
+    }
+
     async function sendWorkflowRequest() {
       await fetch('/api/config', { headers: { 'accept': 'application/json' } });
       await fetch('/api/submit', {
@@ -29,20 +49,70 @@ INDEX_HTML = """<!doctype html>
     });
 
     window.addEventListener('load', () => {
+      autoTrigger('go');
+    });
+  </script>
+</body>
+</html>
+"""
+
+AUTH_HTML = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Workflow Auth Fixture</title>
+</head>
+<body>
+  <h1>Workflow Auth Fixture</h1>
+  <button id="login">Login and load private data</button>
+  <script>
+    function autoTrigger(buttonId) {
       let attempts = 0;
       const interval = setInterval(() => {
         attempts += 1;
         if (window.__agentMcpBDeepInstalled) {
           clearInterval(interval);
           setTimeout(() => {
-            document.getElementById('go').click();
+            document.getElementById(buttonId).click();
           }, 150);
           return;
         }
-        if (attempts >= 50) {
+        if (attempts >= 15) {
           clearInterval(interval);
+          setTimeout(() => {
+            document.getElementById(buttonId).click();
+          }, 150);
         }
       }, 100);
+    }
+
+    async function loginAndLoad() {
+      await fetch('/auth/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'content-type': 'application/json',
+          'authorization': 'Bearer fixture-login'
+        },
+        body: JSON.stringify({ username: 'demo-user' })
+      });
+
+      await fetch('/api/private', {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          'accept': 'application/json',
+          'x-api-client': 'workflow-auth-fixture'
+        }
+      });
+    }
+
+    document.getElementById('login').addEventListener('click', () => {
+      loginAndLoad();
+    });
+
+    window.addEventListener('load', () => {
+      autoTrigger('login');
     });
   </script>
 </body>
@@ -59,14 +129,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _write_html(self, html):
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == "/":
-            body = INDEX_HTML.encode("utf-8")
-            self.send_response(200)
-            self.send_header("content-type", "text/html; charset=utf-8")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._write_html(INDEX_HTML)
+            return
+
+        if self.path == "/auth":
+            self._write_html(AUTH_HTML)
             return
 
         if self.path.startswith("/api/config"):
@@ -80,9 +157,43 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path.startswith("/api/private"):
+            cookie_header = self.headers.get("cookie", "")
+            if "sid=workflow-session" not in cookie_header:
+                self._write_json(401, {"error": "missing_session"})
+                return
+            self._write_json(
+                200,
+                {
+                    "ok": True,
+                    "user": "demo-user",
+                    "permissions": ["read", "write"],
+                },
+            )
+            return
+
         self._write_json(404, {"error": "not_found"})
 
     def do_POST(self):
+        if self.path.startswith("/auth/login"):
+            length = int(self.headers.get("content-length", "0"))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            parsed = json.loads(body or "{}")
+            response = json.dumps(
+                {
+                    "ok": True,
+                    "user": parsed.get("username", "unknown"),
+                    "session": "workflow-session",
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("set-cookie", "sid=workflow-session; Path=/; HttpOnly; SameSite=Lax")
+            self.send_header("content-length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+            return
+
         if self.path.startswith("/api/submit"):
             length = int(self.headers.get("content-length", "0"))
             body = self.rfile.read(length).decode("utf-8") if length else "{}"
@@ -105,7 +216,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8012
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+    server = HTTPServer((host, port), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

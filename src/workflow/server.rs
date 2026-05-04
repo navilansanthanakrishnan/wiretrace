@@ -67,6 +67,9 @@ pub async fn run_client_begin(command: WorkflowBeginCommand) -> Result<()> {
         open: command.open,
         user_data_dir: command.user_data_dir,
         name: command.name,
+        host_contains: command.host_contains,
+        url_contains: command.url_contains,
+        methods: command.methods,
     };
     let client = reqwest::Client::new();
     let response = client
@@ -374,6 +377,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <label>User Data Dir
           <input id="profile" placeholder="/tmp/workflow-browser-profile" />
         </label>
+        <label>Host Filters
+          <input id="hostFilters" placeholder="discord.com,api.example.com" />
+        </label>
+        <label>URL Filters
+          <input id="urlFilters" placeholder="/api/,/trpc/" />
+        </label>
+        <label>Method Filters
+          <input id="methodFilters" placeholder="GET,POST" />
+        </label>
         <div class="stack">
           <button id="begin">Begin Recording</button>
           <button id="stop" class="secondary">Stop + Analyze</button>
@@ -437,7 +449,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
           name: document.getElementById('name').value || null,
           service: document.getElementById('service').value,
           open: document.getElementById('open').value,
-          user_data_dir: document.getElementById('profile').value || null
+          user_data_dir: document.getElementById('profile').value || null,
+          host_contains: document.getElementById('hostFilters').value
+            ? document.getElementById('hostFilters').value.split(',').map(value => value.trim()).filter(Boolean)
+            : [],
+          url_contains: document.getElementById('urlFilters').value
+            ? document.getElementById('urlFilters').value.split(',').map(value => value.trim()).filter(Boolean)
+            : [],
+          methods: document.getElementById('methodFilters').value
+            ? document.getElementById('methodFilters').value.split(',').map(value => value.trim()).filter(Boolean)
+            : []
         })
       });
       await refreshStatus();
