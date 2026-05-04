@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
+use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
-use tokio::process::Command;
+use tokio::process::Command as AsyncCommand;
 
 #[derive(Debug, Clone)]
 pub struct ProxySettings {
@@ -38,12 +39,26 @@ pub async fn restore_snapshot(service: &str, snapshot: &ProxySnapshot) -> Result
     restore_proxy(service, ProxyKind::SecureWeb, &snapshot.secure_web).await
 }
 
+pub fn restore_snapshot_blocking(service: &str, snapshot: &ProxySnapshot) -> Result<()> {
+    restore_proxy_blocking(service, ProxyKind::Web, &snapshot.web)?;
+    restore_proxy_blocking(service, ProxyKind::SecureWeb, &snapshot.secure_web)
+}
+
 async fn restore_proxy(service: &str, kind: ProxyKind, settings: &ProxySettings) -> Result<()> {
     if settings.enabled {
         set_proxy(service, kind, &settings.server, &settings.port.to_string()).await?;
         set_proxy_state(service, kind, true).await
     } else {
         set_proxy_state(service, kind, false).await
+    }
+}
+
+fn restore_proxy_blocking(service: &str, kind: ProxyKind, settings: &ProxySettings) -> Result<()> {
+    if settings.enabled {
+        set_proxy_blocking(service, kind, &settings.server, &settings.port.to_string())?;
+        set_proxy_state_blocking(service, kind, true)
+    } else {
+        set_proxy_state_blocking(service, kind, false)
     }
 }
 
@@ -64,22 +79,51 @@ async fn set_proxy_state(service: &str, kind: ProxyKind, enabled: bool) -> Resul
     run_networksetup(&args).await.map(|_| ())
 }
 
+fn set_proxy_blocking(service: &str, kind: ProxyKind, host: &str, port: &str) -> Result<()> {
+    let args = [kind.set_command(), service, host, port, "off"];
+    run_networksetup_blocking(&args).map(|_| ())
+}
+
+fn set_proxy_state_blocking(service: &str, kind: ProxyKind, enabled: bool) -> Result<()> {
+    let state = if enabled { "on" } else { "off" };
+    let args = [kind.state_command(), service, state];
+    run_networksetup_blocking(&args).map(|_| ())
+}
+
 async fn run_networksetup(args: &[&str]) -> Result<String> {
-    let output = Command::new("networksetup")
+    let output = AsyncCommand::new("networksetup")
         .args(args)
         .output()
         .await
         .with_context(|| format!("failed to execute networksetup {}", args.join(" ")))?;
 
-    if !output.status.success() {
+    validate_networksetup_output(args, output.status.success(), &output.stdout, &output.stderr)
+}
+
+fn run_networksetup_blocking(args: &[&str]) -> Result<String> {
+    let output = ProcessCommand::new("networksetup")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to execute networksetup {}", args.join(" ")))?;
+
+    validate_networksetup_output(args, output.status.success(), &output.stdout, &output.stderr)
+}
+
+fn validate_networksetup_output(
+    args: &[&str],
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<String> {
+    if !success {
         bail!(
             "networksetup {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(stderr).trim()
         );
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(stdout).into_owned())
 }
 
 fn parse_proxy_output(output: &str) -> Result<ProxySettings> {
