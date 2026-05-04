@@ -3,6 +3,7 @@ mod attach;
 mod chrome;
 mod cli;
 mod commands;
+mod interaction;
 mod local_ca;
 mod logging;
 mod proxy;

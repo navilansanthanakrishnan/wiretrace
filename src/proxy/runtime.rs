@@ -1,5 +1,5 @@
-use std::net::SocketAddr;
 use std::io::{self, BufRead};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -8,9 +8,10 @@ use hudsucker::rustls::crypto::aws_lc_rs;
 
 use crate::app::AppPaths;
 use crate::cli::{InteractionMode, ProxyCommand};
+use crate::interaction::InteractionCapture;
 
 use super::authority::CertificateAuthorityPaths;
-use super::capture::{CaptureConfig, CaptureHandler, Filters, InteractionCapture};
+use super::capture::{CaptureConfig, CaptureHandler, Filters};
 
 pub async fn run(paths: &AppPaths, command: ProxyCommand) -> Result<()> {
     run_with_shutdown(paths, command, async {
@@ -54,10 +55,21 @@ where
         InteractionMode::Off => {}
         InteractionMode::Manual => {
             println!(
-                "interaction mode: manual\npress Enter right before the UI action to arm a {}ms capture window\n",
-                interaction.window_ms()
+                "interaction mode: manual\npress Enter right before the UI action to arm interaction capture for a {}ms first-request window with {}ms idle cascade tracking and a {}ms max session length\n",
+                interaction.first_request_window_ms(),
+                interaction.idle_timeout_ms(),
+                interaction.max_duration_ms()
             );
             start_manual_interaction_loop(interaction);
+        }
+        InteractionMode::Auto => {
+            println!(
+                "interaction mode: auto\nlistening for global mouse/keyboard interactions with a {}ms first-request window, {}ms idle cascade tracking, and a {}ms max session length\nTerminal.app must have Accessibility permission in System Settings > Privacy & Security > Accessibility\n",
+                interaction.first_request_window_ms(),
+                interaction.idle_timeout_ms(),
+                interaction.max_duration_ms()
+            );
+            interaction.start_auto_listener()?;
         }
     }
     println!("press Ctrl+C to stop\n");
@@ -99,10 +111,11 @@ fn start_manual_interaction_loop(interaction: InteractionCapture) {
                 break;
             }
 
-            let _deadline = interaction.arm_now();
+            let context = interaction.arm_manual();
             println!(
-                "armed interaction capture window for {}ms",
-                interaction.window_ms()
+                "armed interaction #{} for {}ms",
+                context.id,
+                interaction.first_request_window_ms()
             );
         }
     });

@@ -149,7 +149,9 @@ The proxy exposes three output modes.
 
 ## Interaction-Scoped Capture
 
-The proxy can also run in a manual interaction mode:
+The proxy can run in two interaction-scoped modes.
+
+Manual mode:
 
 ```bash
 cargo run -- chrome \
@@ -160,7 +162,22 @@ cargo run -- chrome \
   --interaction-mode manual
 ```
 
-In this mode, the proxy still owns the transport path, but it only emits captures for requests that begin within a manually armed time window. When the proxy starts, press `Enter` in the terminal immediately before the UI action you care about, then perform the click, form submit, or navigation. This is an approximation of UI causality, not a full UI-event attribution engine.
+Automatic mode:
+
+```bash
+cargo run -- attach \
+  --listen 127.0.0.1:8787 \
+  --service Wi-Fi \
+  --host-contains discord.com \
+  --url-contains /api/ \
+  --interaction-mode auto
+```
+
+In both modes, the proxy still owns the transport path, but it only emits captures for requests associated with an interaction session instead of every matching request.
+
+Manual mode opens an interaction session when you press `Enter` in the terminal. Auto mode opens an interaction session from a macOS global input hook when it sees a mouse press or keyboard interaction, then keeps the session alive across the resulting request cascade until network idle or the session hard deadline is reached.
+
+Auto mode is the most accurate cross-app path currently available in this codebase, but it is still an approximation of causality. It correlates UI input timing with network bursts; it does not yet inspect each app’s internal event graph. On macOS, Terminal must have Accessibility permission for the global input hook to work.
 
 ## Commands
 

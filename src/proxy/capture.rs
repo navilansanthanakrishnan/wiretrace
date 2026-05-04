@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +13,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::cli::{InteractionMode, OutputMode};
+use crate::interaction::{InteractionCapture, InteractionContext};
 
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
@@ -29,46 +29,6 @@ pub struct Filters {
     pub host_contains: Vec<String>,
     pub url_contains: Vec<String>,
     pub methods: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct InteractionCapture {
-    mode: InteractionMode,
-    window_ms: u64,
-    armed_until_ms: Arc<AtomicU64>,
-}
-
-impl InteractionCapture {
-    pub fn new(mode: InteractionMode, window_ms: u64) -> Self {
-        Self {
-            mode,
-            window_ms,
-            armed_until_ms: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    pub fn mode(&self) -> InteractionMode {
-        self.mode
-    }
-
-    pub fn window_ms(&self) -> u64 {
-        self.window_ms
-    }
-
-    pub fn arm_now(&self) -> u128 {
-        let deadline = now_ms().saturating_add(self.window_ms as u128);
-        self.armed_until_ms.store(deadline as u64, Ordering::Relaxed);
-        deadline
-    }
-
-    pub fn should_capture_now(&self) -> bool {
-        match self.mode {
-            InteractionMode::Off => true,
-            InteractionMode::Manual => {
-                now_ms() <= self.armed_until_ms.load(Ordering::Relaxed) as u128
-            }
-        }
-    }
 }
 
 impl Filters {
@@ -191,10 +151,14 @@ async fn capture_request(
         return Ok((request, None));
     }
 
-    if !config.interaction.should_capture_now() {
-        let request = Request::from_parts(parts, body);
-        return Ok((request, None));
-    }
+    let interaction = match config.interaction.observe_request_start() {
+        Some(context) => Some(context),
+        None if config.interaction.mode() != InteractionMode::Off => {
+            let request = Request::from_parts(parts, body);
+            return Ok((request, None));
+        }
+        None => None,
+    };
 
     let collected = body
         .collect()
@@ -212,6 +176,7 @@ async fn capture_request(
         focus_headers: summarize_headers(&parts.headers, HeaderFocus::Request),
         body: body_preview(&parts.headers, &bytes, config.body_preview_bytes),
         is_connect: parts.method.as_str().eq_ignore_ascii_case("CONNECT"),
+        interaction,
     };
 
     let request = Request::from_parts(parts, Body::from(Full::new(bytes.clone())));
@@ -317,6 +282,7 @@ struct CapturedRequest {
     focus_headers: Vec<HeaderEntry>,
     body: BodyPreview,
     is_connect: bool,
+    interaction: Option<InteractionContext>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -391,6 +357,18 @@ impl EventPrinter {
                     "\n[request] {} {}\n  host: {}\n  version: {}",
                     request.method, request.url, request.host, request.version
                 );
+                if let Some(interaction) = &request.interaction {
+                    println!(
+                        "  interaction: #{} {}{}",
+                        interaction.id,
+                        interaction.trigger,
+                        interaction
+                            .app_name
+                            .as_ref()
+                            .map(|name| format!(" in {name}"))
+                            .unwrap_or_default()
+                    );
+                }
                 print_headers(&request.headers);
                 print_body("request-body", &request.body);
             }
@@ -424,6 +402,19 @@ impl EventPrinter {
 fn print_focused_flow(request: &CapturedRequest, response: &CapturedResponse) {
     println!("\n[flow] {} {}", request.method, request.url);
     println!("  status: {} {}", response.status, response.reason);
+
+    if let Some(interaction) = &request.interaction {
+        println!(
+            "  interaction: #{} {}{}",
+            interaction.id,
+            interaction.trigger,
+            interaction
+                .app_name
+                .as_ref()
+                .map(|name| format!(" in {name}"))
+                .unwrap_or_default()
+        );
+    }
 
     if !request.focus_headers.is_empty() {
         println!("  request-headers:");
@@ -731,9 +722,8 @@ mod tests {
 
     use super::{
         BodyKind, BodyPreview, CapturedRequest, CapturedResponse, Filters, HeaderEntry,
-        InteractionCapture, body_preview, is_api_like, serialize_headers,
+        body_preview, is_api_like, serialize_headers,
     };
-    use crate::cli::InteractionMode;
 
     #[test]
     fn filters_match_when_all_constraints_pass() {
@@ -837,6 +827,7 @@ mod tests {
             focus_headers: Vec::new(),
             body: empty_body_preview(),
             is_connect: false,
+            interaction: None,
         };
 
         let response = CapturedResponse {
@@ -861,15 +852,6 @@ mod tests {
         };
 
         assert!(!is_api_like(&request, &response));
-    }
-
-    #[test]
-    fn manual_interaction_gate_requires_arming() {
-        let interaction = InteractionCapture::new(InteractionMode::Manual, 1000);
-        assert!(!interaction.should_capture_now());
-
-        interaction.arm_now();
-        assert!(interaction.should_capture_now());
     }
 
     fn empty_body_preview() -> BodyPreview {

@@ -175,4 +175,5 @@ pub enum OutputMode {
 pub enum InteractionMode {
     Off,
     Manual,
+    Auto,
 }
