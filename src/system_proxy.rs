@@ -1,5 +1,6 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::Command as ProcessCommand;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command as AsyncCommand;
@@ -18,10 +19,12 @@ pub struct ProxySnapshot {
 }
 
 pub async fn capture_snapshot(service: &str) -> Result<ProxySnapshot> {
-    Ok(ProxySnapshot {
+    let mut snapshot = ProxySnapshot {
         web: read_proxy(service, ProxyKind::Web).await?,
         secure_web: read_proxy(service, ProxyKind::SecureWeb).await?,
-    })
+    };
+    sanitize_stale_loopback_snapshot(&mut snapshot);
+    Ok(snapshot)
 }
 
 pub async fn enable_local_proxy(service: &str, listen: SocketAddr) -> Result<()> {
@@ -148,6 +151,41 @@ fn parse_proxy_output(output: &str) -> Result<ProxySettings> {
     })
 }
 
+fn sanitize_stale_loopback_snapshot(snapshot: &mut ProxySnapshot) {
+    sanitize_stale_loopback_setting(&mut snapshot.web);
+    sanitize_stale_loopback_setting(&mut snapshot.secure_web);
+}
+
+fn sanitize_stale_loopback_setting(settings: &mut ProxySettings) {
+    if !settings.enabled || !is_loopback_host(&settings.server) || settings.port == 0 {
+        return;
+    }
+
+    if loopback_listener_alive(&settings.server, settings.port) {
+        return;
+    }
+
+    settings.enabled = false;
+    settings.server.clear();
+    settings.port = 0;
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn loopback_listener_alive(host: &str, port: u16) -> bool {
+    let connect_host = if host == "localhost" { "127.0.0.1" } else { host };
+    let Ok(mut addrs) = (connect_host, port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+
+    TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ProxyKind {
     Web,
@@ -174,5 +212,67 @@ impl ProxyKind {
             Self::Web => "-setwebproxystate",
             Self::SecureWeb => "-setsecurewebproxystate",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ProxySettings, ProxySnapshot, is_loopback_host, sanitize_stale_loopback_snapshot,
+    };
+
+    #[test]
+    fn stale_loopback_snapshot_is_downgraded_to_disabled() {
+        let mut snapshot = ProxySnapshot {
+            web: ProxySettings {
+                enabled: true,
+                server: "127.0.0.1".to_string(),
+                port: 65000,
+            },
+            secure_web: ProxySettings {
+                enabled: true,
+                server: "localhost".to_string(),
+                port: 65001,
+            },
+        };
+
+        sanitize_stale_loopback_snapshot(&mut snapshot);
+
+        assert!(!snapshot.web.enabled);
+        assert_eq!(snapshot.web.server, "");
+        assert_eq!(snapshot.web.port, 0);
+        assert!(!snapshot.secure_web.enabled);
+        assert_eq!(snapshot.secure_web.server, "");
+        assert_eq!(snapshot.secure_web.port, 0);
+    }
+
+    #[test]
+    fn non_loopback_snapshot_is_preserved() {
+        let mut snapshot = ProxySnapshot {
+            web: ProxySettings {
+                enabled: true,
+                server: "10.0.0.2".to_string(),
+                port: 8080,
+            },
+            secure_web: ProxySettings {
+                enabled: false,
+                server: String::new(),
+                port: 0,
+            },
+        };
+
+        sanitize_stale_loopback_snapshot(&mut snapshot);
+
+        assert!(snapshot.web.enabled);
+        assert_eq!(snapshot.web.server, "10.0.0.2");
+        assert_eq!(snapshot.web.port, 8080);
+    }
+
+    #[test]
+    fn loopback_host_matches_supported_values() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("10.0.0.2"));
     }
 }
