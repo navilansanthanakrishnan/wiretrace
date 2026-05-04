@@ -28,6 +28,8 @@ pub enum Command {
     Proxy(ProxyCommand),
     /// Launch Chrome through the local interception proxy.
     Chrome(ChromeCommand),
+    /// Launch Chrome with a DevTools-driven deep interaction observer.
+    BrowserDeep(BrowserDeepCommand),
     /// Start the interception proxy and attach already-open macOS apps via the system proxy.
     Attach(AttachCommand),
     /// Install or inspect the local CA used for HTTPS interception.
@@ -128,6 +130,66 @@ pub struct ChromeCommand {
         help = "Persist the browser profile at this path instead of using a temporary profile."
     )]
     pub user_data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BrowserDeepCommand {
+    #[arg(long, value_enum, default_value_t = OutputMode::Simple)]
+    pub output: OutputMode,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Only emit requests whose host contains one of these values"
+    )]
+    pub host_contains: Vec<String>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Only emit requests whose URL contains one of these values"
+    )]
+    pub url_contains: Vec<String>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Only emit requests whose HTTP method matches one of these values"
+    )]
+    pub methods: Vec<String>,
+
+    #[arg(
+        long,
+        default_value = "https://example.com",
+        help = "Initial URL to open in the managed Chrome session"
+    )]
+    pub open: String,
+
+    #[arg(
+        long,
+        help = "Path to the Chrome executable. When omitted, macOS defaults are tried."
+    )]
+    pub chrome_path: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Persist the browser profile at this path instead of using a temporary profile."
+    )]
+    pub user_data_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        default_value_t = 9223,
+        help = "Remote debugging port for the managed browser session"
+    )]
+    pub remote_debugging_port: u16,
+
+    #[arg(
+        long,
+        default_value_t = 4000,
+        help = "Requests must begin within this many milliseconds of an observed browser interaction to be attributed"
+    )]
+    pub interaction_window_ms: u64,
 }
 
 #[derive(Debug, Clone, Args)]

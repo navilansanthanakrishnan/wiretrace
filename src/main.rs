@@ -1,5 +1,6 @@
 mod app;
 mod attach;
+mod browser_deep;
 mod chrome;
 mod cli;
 mod commands;
@@ -27,6 +28,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Proxy(command) => commands::run_proxy(&paths, command).await?,
         Command::Chrome(command) => commands::run_chrome(&paths, command).await?,
+        Command::BrowserDeep(command) => commands::run_browser_deep(&paths, command).await?,
         Command::Attach(command) => commands::run_attach(&paths, command).await?,
         Command::Ca(command) => commands::run_ca(&paths, command).await?,
         Command::Paths => {

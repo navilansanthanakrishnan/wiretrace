@@ -7,6 +7,7 @@
 At a high level, the tool runs a local man-in-the-middle proxy, terminates outbound TLS with a locally generated certificate authority, forwards requests upstream, and emits structured request/response captures to the terminal. It supports two routing models on macOS:
 
 - managed browser launch, where Chrome is started with explicit proxy flags
+- managed browser-deep launch, where Chrome/Chromium is started with the DevTools Protocol for direct interaction-to-network attribution
 - existing-app attachment, where the macOS system web and secure web proxies are temporarily pointed at the local listener
 
 The intent is to make network workflows legible. Instead of watching a UI and guessing what happened, the tool exposes the underlying HTTP exchange: method, URL, headers, request body, response status, response headers, and decoded response body.
@@ -151,6 +152,32 @@ The proxy exposes three output modes.
 - emits structured JSON-line events
 - useful when another tool will consume the capture stream
 
+## Browser-Deep Mode
+
+`browser-deep` is separate from the proxy path.
+
+Instead of inferring interactions from global input timing, it launches a managed Chrome/Chromium session with the Chrome DevTools Protocol enabled, injects DOM event listeners into the page, and subscribes to browser-native network events. That allows the tool to attribute requests to concrete browser interactions such as:
+
+- clicking a button
+- pressing `Enter` in a form or contenteditable field
+- submitting a form
+
+The important distinction is:
+
+- proxy mode answers: `what traffic happened?`
+- browser-deep mode answers: `which request did this browser interaction trigger?`
+
+At startup the tool:
+
+- launches Chrome/Chromium with `--remote-debugging-port`
+- discovers the active page target through the DevTools HTTP endpoint
+- attaches to that page's WebSocket debugger target
+- enables `Page`, `Runtime`, `Debugger`, and `Network`
+- injects an interaction binding and DOM listeners for `click`, `submit`, and `keydown`
+- waits for matching `Network.*` events and attributes them to recent page interactions
+
+This is the highest-accuracy path currently available in the codebase for websites and Chromium-based apps.
+
 ## Interaction-Scoped Capture
 
 The proxy can run in two interaction-scoped modes.
@@ -235,6 +262,36 @@ cargo run -- chrome \
 ```
 
 That flag is a bootstrap/debug path, not the normal operating mode.
+
+### Launch a Browser-Deep Session
+
+```bash
+cargo run -- browser-deep \
+  --open https://discord.com/channels/@me \
+  --host-contains discord.com \
+  --url-contains /api/ \
+  --output simple
+```
+
+Typical output:
+
+```text
+[interaction #7] keydown div[contenteditable=true] @ discord.com/channels/@me
+  POST (discord.com/api/v9/channels/:id/messages) {attachments,author,channel_id} [200]
+```
+
+Use `--user-data-dir` if you want a persistent logged-in browser profile:
+
+```bash
+cargo run -- browser-deep \
+  --open https://discord.com/channels/@me \
+  --host-contains discord.com \
+  --url-contains /api/ \
+  --user-data-dir /tmp/agent-mcp-b-discord-profile \
+  --output simple
+```
+
+`browser-deep` currently targets managed Chrome/Chromium sessions. Chromium-based executables that support the same remote debugging flags can also be used via `--chrome-path`.
 
 ### Attach Already-Open macOS Apps
 
