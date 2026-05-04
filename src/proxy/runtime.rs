@@ -47,6 +47,7 @@ where
         },
         body_preview_bytes: command.body_preview_bytes,
         show_connect: command.show_connect,
+        allow_sensitive_output: command.allow_sensitive_output,
         interaction: interaction.clone(),
     });
 

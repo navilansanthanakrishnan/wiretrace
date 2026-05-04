@@ -23,6 +23,7 @@ pub struct CaptureConfig {
     pub filters: Filters,
     pub body_preview_bytes: usize,
     pub show_connect: bool,
+    pub allow_sensitive_output: bool,
     pub interaction: InteractionCapture,
 }
 
@@ -174,9 +175,18 @@ async fn capture_request(
         url,
         host,
         version: format!("{:?}", parts.version),
-        headers: serialize_headers(&parts.headers),
-        focus_headers: summarize_headers(&parts.headers, HeaderFocus::Request),
-        body: body_preview(&parts.headers, &bytes, config.body_preview_bytes),
+        headers: serialize_headers(&parts.headers, config.allow_sensitive_output),
+        focus_headers: summarize_headers(
+            &parts.headers,
+            HeaderFocus::Request,
+            config.allow_sensitive_output,
+        ),
+        body: body_preview(
+            &parts.headers,
+            &bytes,
+            config.body_preview_bytes,
+            config.allow_sensitive_output,
+        ),
         is_connect: parts.method.as_str().eq_ignore_ascii_case("CONNECT"),
         interaction,
     };
@@ -207,9 +217,18 @@ async fn capture_response(
             .canonical_reason()
             .unwrap_or("unknown")
             .to_string(),
-        headers: serialize_headers(&parts.headers),
-        focus_headers: summarize_headers(&parts.headers, HeaderFocus::Response),
-        body: body_preview(&parts.headers, &bytes, config.body_preview_bytes),
+        headers: serialize_headers(&parts.headers, config.allow_sensitive_output),
+        focus_headers: summarize_headers(
+            &parts.headers,
+            HeaderFocus::Response,
+            config.allow_sensitive_output,
+        ),
+        body: body_preview(
+            &parts.headers,
+            &bytes,
+            config.body_preview_bytes,
+            config.allow_sensitive_output,
+        ),
     };
 
     let response = Response::from_parts(parts, Body::from(Full::new(bytes.clone())));
@@ -594,17 +613,25 @@ fn request_url(headers: &HeaderMap, uri: &Uri, default_scheme: Option<&str>) -> 
     format!("{scheme}://{host}{path}")
 }
 
-fn serialize_headers(headers: &HeaderMap) -> Vec<HeaderEntry> {
+fn serialize_headers(headers: &HeaderMap, allow_sensitive_output: bool) -> Vec<HeaderEntry> {
     headers
         .iter()
         .map(|(name, value)| HeaderEntry {
             name: name.as_str().to_string(),
-            value: redact_header(name.as_str(), &String::from_utf8_lossy(value.as_bytes())),
+            value: redact_header(
+                name.as_str(),
+                &String::from_utf8_lossy(value.as_bytes()),
+                allow_sensitive_output,
+            ),
         })
         .collect()
 }
 
-fn summarize_headers(headers: &HeaderMap, focus: HeaderFocus) -> Vec<HeaderEntry> {
+fn summarize_headers(
+    headers: &HeaderMap,
+    focus: HeaderFocus,
+    allow_sensitive_output: bool,
+) -> Vec<HeaderEntry> {
     let names = match focus {
         HeaderFocus::Request => [
             "content-type",
@@ -624,14 +651,18 @@ fn summarize_headers(headers: &HeaderMap, focus: HeaderFocus) -> Vec<HeaderEntry
         .filter_map(|name| {
             headers.get(*name).map(|value| HeaderEntry {
                 name: (*name).to_string(),
-                value: redact_header(name, &String::from_utf8_lossy(value.as_bytes())),
+                value: redact_header(
+                    name,
+                    &String::from_utf8_lossy(value.as_bytes()),
+                    allow_sensitive_output,
+                ),
             })
         })
         .collect()
 }
 
-fn redact_header(name: &str, value: &str) -> String {
-    if is_sensitive_name(name) {
+fn redact_header(name: &str, value: &str, allow_sensitive_output: bool) -> String {
+    if !allow_sensitive_output && is_sensitive_name(name) {
         "<redacted>".into()
     } else {
         value.to_string()
@@ -655,7 +686,12 @@ fn is_sensitive_name(name: &str) -> bool {
     )
 }
 
-fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview {
+fn body_preview(
+    headers: &HeaderMap,
+    bytes: &[u8],
+    limit: usize,
+    allow_sensitive_output: bool,
+) -> BodyPreview {
     if bytes.is_empty() {
         return BodyPreview {
             kind: BodyKind::Empty,
@@ -681,7 +717,7 @@ fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview 
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    if let Some(pretty_json) = render_json_preview(slice) {
+    if let Some(pretty_json) = render_json_preview(slice, allow_sensitive_output) {
         return BodyPreview {
             kind: BodyKind::Json,
             preview: pretty_json,
@@ -719,10 +755,12 @@ fn body_preview(headers: &HeaderMap, bytes: &[u8], limit: usize) -> BodyPreview 
     }
 }
 
-fn render_json_preview(slice: &[u8]) -> Option<String> {
+fn render_json_preview(slice: &[u8], allow_sensitive_output: bool) -> Option<String> {
     let text = std::str::from_utf8(slice).ok()?;
     let mut value = serde_json::from_str::<Value>(text).ok()?;
-    redact_json_value(&mut value);
+    if !allow_sensitive_output {
+        redact_json_value(&mut value);
+    }
     serde_json::to_string_pretty(&value).ok()
 }
 
@@ -882,7 +920,7 @@ mod tests {
     #[test]
     fn body_preview_formats_json() {
         let headers = HeaderMap::new();
-        let preview = body_preview(&headers, br#"{"ok":true,"items":[1,2]}"#, 512);
+        let preview = body_preview(&headers, br#"{"ok":true,"items":[1,2]}"#, 512, false);
         assert_eq!(preview.kind, BodyKind::Json);
         assert!(preview.preview.contains("\"ok\": true"));
     }
@@ -894,7 +932,7 @@ mod tests {
         headers.insert("cookie", HeaderValue::from_static("token=super-secret"));
         headers.insert("accept", HeaderValue::from_static("application/json"));
 
-        let serialized = serialize_headers(&headers);
+        let serialized = serialize_headers(&headers, false);
 
         assert!(serialized.iter().any(|entry| {
             entry.name == "authorization" && entry.value == "<redacted>"
@@ -917,7 +955,7 @@ mod tests {
         encoder.write_all(br#"{"ok":true,"items":[1,2]}"#).unwrap();
         let bytes = encoder.finish().unwrap();
 
-        let preview = body_preview(&headers, &bytes, 512);
+        let preview = body_preview(&headers, &bytes, 512, false);
         assert_eq!(preview.kind, BodyKind::Json);
         assert_eq!(preview.encoding.as_deref(), Some("gzip"));
         assert!(preview.preview.contains("\"items\": ["));
@@ -932,6 +970,7 @@ mod tests {
             &headers,
             br#"{"headers":{"Authorization":"Bearer super-secret-token"},"access_token":"abc123"}"#,
             512,
+            false,
         );
 
         assert_eq!(preview.kind, BodyKind::Json);
@@ -939,6 +978,31 @@ mod tests {
         assert!(preview.preview.contains("\"access_token\": \"<redacted>\""));
         assert!(!preview.preview.contains("super-secret-token"));
         assert!(!preview.preview.contains("abc123"));
+    }
+
+    #[test]
+    fn allow_sensitive_output_keeps_auth_headers_and_json_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer super-secret"));
+        headers.insert("cookie", HeaderValue::from_static("token=super-secret"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let serialized = serialize_headers(&headers, true);
+        assert!(serialized.iter().any(|entry| {
+            entry.name == "authorization" && entry.value == "Bearer super-secret"
+        }));
+        assert!(serialized.iter().any(|entry| {
+            entry.name == "cookie" && entry.value == "token=super-secret"
+        }));
+
+        let preview = body_preview(
+            &headers,
+            br#"{"headers":{"Authorization":"Bearer super-secret-token"},"access_token":"abc123"}"#,
+            512,
+            true,
+        );
+        assert!(preview.preview.contains("super-secret-token"));
+        assert!(preview.preview.contains("abc123"));
     }
 
     #[test]

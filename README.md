@@ -315,6 +315,7 @@ Capture output can be constrained with:
 - `--host-contains`
 - `--url-contains`
 - `--methods`
+- `--allow-sensitive-output` to disable redaction of auth headers and sensitive JSON fields when you explicitly need raw cookies/tokens
 
 Example:
 

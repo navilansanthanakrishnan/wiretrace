@@ -87,6 +87,13 @@ pub struct ProxyCommand {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Dangerous: disable redaction and print raw sensitive headers/body fields such as Authorization and Cookie"
+    )]
+    pub allow_sensitive_output: bool,
+
+    #[arg(
+        long,
         value_enum,
         default_value_t = InteractionMode::Off,
         help = "Capture every matching request, or only requests that begin within a manually armed interaction window"
