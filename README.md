@@ -1,6 +1,8 @@
-# agent-mcp-b
+# reqtrace
 
-`agent-mcp-b` is a Rust-based local protocol observation runtime for turning software usage into structured network workflows.
+`reqtrace` is a Rust-based local protocol observation runtime that traces UI interactions to the API requests they trigger and turns real software usage into structured, replayable network workflows.
+
+> Formerly `agent-mcp-b`. The crate, binary, CA certificate, and application data directory still use the `agent-mcp-b` identifier so existing installs and trusted certificates keep working; only the project name changed.
 
 It has three operating layers:
 
