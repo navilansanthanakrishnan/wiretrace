@@ -1,7 +1,16 @@
-"""The reqtrace MCP server: the surface an agent drives.
+"""reqtrace watches an application and tells you what API it is really calling.
 
-The whole loop is seven tools — start watching, stop, look at what the app's API
-turned out to be, call it, and keep it as a standalone MCP server.
+The loop: start_capture, use the app, stop_capture, then read the endpoints it
+inferred, call one for real, and keep the result as a standalone MCP server.
+
+reqtrace only observes. It does not click, type or navigate — drive the app with
+the computer-use skill (open-computer-use), which is linked at
+`open-computer-use/` in this repo. Run captures with a visible window so it has
+something to drive.
+
+Captured credentials stay in a private store and are reattached on replay, so a
+captured endpoint can be called as the logged-in user without the token ever
+being returned to you.
 """
 
 from __future__ import annotations
@@ -37,8 +46,10 @@ def start_capture(
     to leave macOS network settings alone and route traffic yourself — that is
     the unattended path, and it is how you capture a script or a CLI you drive.
 
-    Use the app normally, then call stop_capture. headless=True runs Chrome
-    without a window; drive it with navigate and evaluate.
+    Use the app normally, then call stop_capture. Driving the UI is not this
+    tool's job: use the computer-use skill against the window. headless=True
+    leaves no window to drive, so it only suits a capture that needs nothing
+    beyond loading `target`.
     """
     session = sessions.start(
         target,
@@ -49,28 +60,11 @@ def start_capture(
         port=port,
     )
     hint = (
-        "chrome is open on the captured tab; drive it with navigate/evaluate"
+        "chrome is open; drive it with the computer-use skill, then stop_capture"
         if mode == "browser"
         else route_hint(session, system_proxy)
     )
     return f"recording session {session.id} ({mode}) -> {session.target}\n{hint}"
-
-
-@mcp.tool()
-def navigate(url: str) -> str:
-    """Point the captured browser tab at a URL."""
-    sessions.resolve(None).navigate(url)
-    return f"navigated to {url}"
-
-
-@mcp.tool()
-def evaluate(expression: str) -> str:
-    """Run JavaScript in the captured tab — click a button, fill a field, scroll.
-
-    This is how you drive a headless capture, e.g.
-    `document.querySelector('button[type=submit]').click()`.
-    """
-    return sessions.resolve(None).evaluate(expression)
 
 
 @mcp.tool()

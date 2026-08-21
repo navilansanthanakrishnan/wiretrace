@@ -29,12 +29,6 @@ def main() -> None:
     sub.add_parser("trust", help="install the local CA into the login keychain")
     sub.add_parser("ca", help="print the CA certificate path, for clients you point at it yourself")
 
-    visit = sub.add_parser("open", help="point the captured browser tab at a URL")
-    visit.add_argument("url")
-
-    run = sub.add_parser("eval", help="run JavaScript in the captured browser tab")
-    run.add_argument("expression", help="e.g. document.querySelector('button').click()")
-
     forget = sub.add_parser("rm", help="delete a capture and everything it recorded")
     forget.add_argument("session_id")
 
@@ -94,11 +88,6 @@ def dispatch(args: argparse.Namespace) -> str:
             return f"trusted {certificate()}"
         case "ca":
             return str(certificate())
-        case "open":
-            sessions.resolve(None).navigate(args.url)
-            return f"navigated to {args.url}"
-        case "eval":
-            return sessions.resolve(None).evaluate(args.expression)
         case "rm":
             return f"deleted {sessions.remove(args.session_id)}"
         case "show":

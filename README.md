@@ -28,22 +28,24 @@ reqtrace call post_indexes_item_dev_query --body '{"query":"claude code"}'
 reqtrace export ./hn-api                            # openapi.json + a runnable MCP server
 ```
 
-Add `--headless` to `start` and drive the page yourself with `reqtrace open`
-and `reqtrace eval` — that is the unattended path, and it needs no window.
-
 An agent does the same thing through the `reqtrace` MCP server. Same operations,
 same session directory, different names:
 
 | CLI | MCP tool |
 |---|---|
 | `reqtrace start` | `start_capture` |
-| `reqtrace open <url>` / `reqtrace eval <js>` | `navigate` / `evaluate` |
 | `reqtrace stop` | `stop_capture` |
 | `reqtrace show` | `list_endpoints` / `describe_endpoint` |
 | `reqtrace call` | `call_endpoint` |
 | `reqtrace export` | `export_mcp` |
 | `reqtrace sessions` / `reqtrace rm` | `list_sessions` / `forget_session` |
 | `reqtrace ca` | `ca_path` |
+
+reqtrace only watches. Clicking, typing and navigating are
+[open-computer-use](https://github.com/NavilanSanthanakrishnan/open-computer-use)'s
+job — it is linked at `open-computer-use/` here, and its `computer-use` skill is
+what an agent should drive the app with. Keeping the two apart is why reqtrace
+has no idea what a button is: it sees requests, nothing else.
 
 ## How it is built
 
@@ -80,7 +82,6 @@ turning on the system proxy exposes the hosts you asked for and nothing else.
 | file | job |
 |---|---|
 | `events.py` | the captured exchange, and the one predicate that separates API calls from page furniture |
-| `cdp.py` | a tiny client for *driving* the captured tab — navigate and evaluate |
 | `api.py` | inference: group requests into endpoints, template out ids, merge schemas, spot auth headers |
 | `session.py` | start / stop a capture, own the session directory |
 | `call.py` | replay an endpoint, filling in whatever the caller did not specify |
@@ -183,8 +184,11 @@ These are real, not temporary caveats hiding a bug:
 
 - macOS only (system proxy and keychain trust are `networksetup` / `security`).
 - One tab per browser capture. The capture attaches to a single page target, so
-  drive it with `navigate`/`evaluate` — a tab you open some other way is not
-  recorded.
+  a tab opened during the session is not recorded. Drive the tab that is already
+  open.
+- Captures meant to be driven need a visible window, because the driver is
+  open-computer-use. `--headless` only suits a capture that needs nothing beyond
+  loading the target URL.
 - Request-to-click attribution exists only in `browser` mode. Proxy captures
   have no UI to attribute to.
 - Certificate-pinned apps will not decrypt through the proxy. Nothing here

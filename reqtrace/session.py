@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import cdp, system
+from . import system
 from .api import Api, infer
 from .events import read
 
@@ -79,26 +79,6 @@ class Session:
             raise RuntimeError(f"no session {session_id}")
         record = json.loads(path.read_text())
         return cls(**{**record, "dir": Path(record["dir"])})
-
-    def navigate(self, url: str) -> None:
-        """Points the captured tab at a URL.
-
-        It must be the *same* tab the capture attached to — a new tab is a new
-        CDP target and nothing in it would be recorded.
-        """
-        self.require_browser()
-        cdp.navigate(self.port, url)
-
-    def evaluate(self, expression: str) -> str:
-        """Runs JavaScript in the captured tab: click, fill a field, scroll."""
-        self.require_browser()
-        return cdp.evaluate(self.port, expression)
-
-    def require_browser(self) -> None:
-        if self.mode != "browser":
-            raise RuntimeError(f"session {self.id} is a {self.mode} capture; there is no page to drive")
-        if not self.recording:
-            raise RuntimeError(f"session {self.id} is not recording")
 
     def await_ready(self, child: subprocess.Popen) -> None:
         """Blocks until the capture can actually see traffic.

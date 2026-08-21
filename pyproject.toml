@@ -3,7 +3,7 @@ name = "reqtrace"
 version = "0.1.0"
 description = "Watch an app, learn its API, hand it to an agent."
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27", "mcp>=2,<3", "websockets>=13"]
+dependencies = ["httpx>=0.27", "mcp>=2,<3"]
 
 [project.scripts]
 reqtrace = "reqtrace.cli:main"
