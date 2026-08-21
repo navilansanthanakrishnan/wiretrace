@@ -1,0 +1,207 @@
+"""Turn an inferred API into something an agent can keep.
+
+Two artifacts: an OpenAPI document, for anything that reads specs, and a
+standalone MCP server, for anything that speaks MCP. The generated server is a
+single readable file the agent is free to edit.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .api import Api, Endpoint
+from .session import Session, hostname, write_private
+
+
+def openapi(endpoints: list[Endpoint], host: str) -> dict:
+    """An OpenAPI 3.1 document for one host.
+
+    One document per host, because `servers` is a document-level list: a spec
+    mixing hosts resolves every path against the first one and is quietly wrong.
+    """
+    paths: dict[str, dict] = {}
+    for endpoint in endpoints:
+        operation = {
+            "operationId": endpoint.id,
+            "summary": endpoint.triggers[0] if endpoint.triggers else f"observed {endpoint.calls}x",
+            "parameters": [
+                {"name": name, "in": "path", "required": True, "schema": {"type": "string"}}
+                for name in endpoint.path_params
+            ]
+            + [
+                {"name": name, "in": "query", "required": False, "schema": {"type": "string"},
+                 "example": example}
+                for name, example in endpoint.query_params.items()
+            ],
+            "security": [{header: []} for header in endpoint.auth],
+            "responses": {
+                str(status): {"content": {"application/json": {"schema": endpoint.response_schema or {}}}}
+                for status in endpoint.statuses
+            },
+        }
+        if endpoint.body_schema:
+            operation["requestBody"] = {"content": {"application/json": {"schema": endpoint.body_schema}}}
+        paths.setdefault(endpoint.path, {})[endpoint.method.lower()] = operation
+
+    return {
+        "openapi": "3.1.0",
+        "info": {"title": host, "version": "0.1.0"},
+        "servers": [{"url": f"https://{host}"}],
+        "paths": paths,
+    }
+
+
+def export(session: Session, dest: Path, only: list[str] | None = None) -> list[Path]:
+    """Writes the API, its spec, credentials and a runnable MCP server into `dest`.
+
+    Telemetry and liveness probes are excluded. `only` is a full override: name
+    an endpoint there and it is exported whatever it is.
+    """
+    api = session.api()
+    endpoints = [e for e in api.endpoints if e.id in only] if only else api.useful()
+    if not endpoints:
+        raise RuntimeError(f"session {session.id} has no endpoints to export")
+
+    dest.mkdir(parents=True, exist_ok=True)
+    hosts = sorted({endpoint.host for endpoint in endpoints})
+    written = []
+
+    for host in hosts:
+        name = "openapi.json" if len(hosts) == 1 else f"openapi-{host}.json"
+        spec = openapi([e for e in endpoints if e.host == host], host)
+        written.append(write(dest / name, json.dumps(spec, indent=2)))
+
+    written.append(write(dest / "api.json", json.dumps({"endpoints": [describe(e) for e in endpoints]}, indent=2)))
+    # Named for what was captured, not for whichever host sorts first.
+    label = hostname(session.target) or hosts[0]
+    written.append(write(dest / "server.py", SERVER_TEMPLATE.format(target=session.target, name=label)))
+
+    # The export is meant to outlive its capture session, so it carries its own
+    # copy of the credentials rather than pointing back at one.
+    write_private(dest / "credentials.json", credentials_for(session, hosts))
+    written.append(dest / "credentials.json")
+    return written
+
+
+def describe(endpoint: Endpoint) -> dict:
+    """The endpoint as the generated server needs it, plus a usable description."""
+    return {**vars(endpoint), "description": signature(endpoint)}
+
+
+def credentials_for(session: Session, hosts: list[str]) -> dict:
+    path = session.dir / "credentials.json"
+    store = json.loads(path.read_text()) if path.exists() else {}
+    return {host: store.get(host, {}) for host in hosts}
+
+
+def write(path: Path, content: str) -> Path:
+    path.write_text(content)
+    return path
+
+
+def signature(endpoint: Endpoint) -> str:
+    """Human-readable call shape, used as the generated tool's description."""
+    parts = [f"{endpoint.method} https://{endpoint.host}{endpoint.path}"]
+    for label, names in (
+        ("path", endpoint.path_params),
+        ("query", list(endpoint.query_params)),
+        ("body", list((endpoint.body_schema or {}).get("properties", {}))),
+        ("returns", list((endpoint.response_schema or {}).get("properties", {}))),
+    ):
+        if names:
+            parts.append(f"{label}: {', '.join(names)}")
+    if endpoint.triggers:
+        parts.append(f"seen from: {endpoint.triggers[0]}")
+    return " | ".join(parts)
+
+
+#: The generated server reads the API description beside it and registers one
+#: tool per endpoint. Everything it needs is in its own directory.
+SERVER_TEMPLATE = '''#!/usr/bin/env python3
+"""MCP server for {target}, generated by reqtrace.
+
+Run it with:  uv run --with mcp --with httpx python server.py
+Reads api.json and credentials.json from this directory. Edit freely — nothing
+regenerates this file.
+"""
+
+import json
+import logging
+from pathlib import Path
+
+import httpx
+from mcp.server.mcpserver import MCPServer
+
+# httpx logs every request URL at INFO, credentials in the query string and all.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+HERE = Path(__file__).parent
+DEFAULT_LIMIT = 8000
+
+ENDPOINTS = json.loads((HERE / "api.json").read_text())["endpoints"]
+CREDENTIALS = json.loads((HERE / "credentials.json").read_text()) if (HERE / "credentials.json").exists() else {{}}
+
+mcp = MCPServer("{name}")
+
+
+def invoke(endpoint, path_params, query, body, limit):
+    """Anything not supplied falls back, field by field, to what was captured."""
+    store = CREDENTIALS.get(endpoint["host"], {{}})
+    headers = {{k: v for k, v in store.items() if not k.startswith("?")}}
+    query = {{
+        **endpoint["query_params"],
+        **{{k[1:]: v for k, v in store.items() if k.startswith("?")}},
+        **query,
+    }}
+    body = {{**(endpoint.get("body_example") or {{}}), **body}} if body else endpoint.get("body_example")
+
+    path = endpoint["path"]
+    for name in endpoint["path_params"]:
+        value = path_params.get(name)
+        if value is None:
+            return f"missing path parameter: {{name}}"
+        path = path.replace("{{%s}}" % name, str(value))
+
+    headers = {{"accept": "application/json", **endpoint.get("headers", {{}}), **headers}}
+    if body is not None:
+        headers["content-type"] = "application/json"
+
+    response = httpx.request(
+        endpoint["method"],
+        f"https://{{endpoint['host']}}{{path}}",
+        params=query or None,
+        headers=headers,
+        content=json.dumps(body) if body is not None else None,
+        timeout=30.0,
+        follow_redirects=True,
+    )
+    # A successful call returns the body alone, so it parses as JSON. Truncation
+    # would break that, so say so loudly rather than emitting a broken document.
+    text = response.text
+    if len(text) > limit:
+        return (
+            f"response was {{len(text)}} characters, over the {{limit}} limit. "
+            f"Raise `limit`, or narrow the request.\\n{{text[:limit]}}\\n... truncated"
+        )
+    return text if response.is_success else f"HTTP {{response.status_code}}\\n{{text}}"
+
+
+def register(endpoint):
+    def tool(
+        path_params: dict | None = None,
+        query: dict | None = None,
+        body: dict | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> str:
+        return invoke(endpoint, path_params or {{}}, query or {{}}, body, limit)
+
+    mcp.add_tool(tool, name=endpoint["id"], description=endpoint["description"])
+
+
+for endpoint in ENDPOINTS:
+    register(endpoint)
+
+if __name__ == "__main__":
+    mcp.run()
+'''

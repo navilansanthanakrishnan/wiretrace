@@ -1,400 +1,203 @@
 # reqtrace
 
-`reqtrace` is a Rust-based local protocol observation runtime that traces UI interactions to the API requests they trigger and turns real software usage into structured, replayable network workflows.
+Watch an application, learn its API, hand it to an agent.
 
-> Formerly `agent-mcp-b`. The crate, binary, CA certificate, and application data directory still use the `agent-mcp-b` identifier so existing installs and trusted certificates keep working; only the project name changed.
+reqtrace observes the HTTP traffic a real app makes while it is used, works out
+what API is behind that traffic, and turns the result into something callable —
+an OpenAPI document, live replay, or a standalone MCP server. No documentation,
+no reverse engineering, no scraping. Just use the app, then stop.
 
-It has three operating layers:
-
-- HTTP(S) interception for desktop and browser traffic routed through a local proxy
-- Chromium/CDP instrumentation for high-accuracy browser interaction-to-request attribution
-- Workflow recording and analysis over the captured event stream, with a localhost UI and optional OpenAI-backed automation synthesis
-- A terminal-style React/Electron Workflow Studio shell backed by the same localhost API
-
-The current build is targeted at:
-
-- existing macOS apps that honor system proxy settings
-- managed Chrome/Chromium sessions
-- workflow capture, normalization, context-map generation, and automation scaffolding
-
-It is not yet a transparent packet interceptor and it does not bypass certificate pinning.
-
-## Architecture
-
-The system is split into four main subsystems.
-
-### 1. Proxy and Capture
-
-The proxy runtime terminates outbound HTTP(S), forwards requests upstream, and captures the application-layer exchange.
-
-- `src/proxy/runtime.rs`
-  boots the local proxy and binds lifecycle/shutdown handling
-- `src/proxy/authority.rs`
-  persists the local CA and generates per-host leaf certificates for MITM TLS
-- `src/proxy/capture.rs`
-  buffers requests/responses, decodes compressed bodies, redacts or preserves sensitive material depending on flags, and renders output in `focused`, `simple`, `pretty`, or `json`
-- `src/local_ca.rs`
-  manages macOS CA trust installation and diagnostics
-
-For HTTPS, the runtime establishes two TLS sessions:
-
-- client -> local proxy
-- local proxy -> origin
-
-That gives the proxy plaintext visibility into the HTTP request/response while preserving normal upstream connectivity.
-
-### 2. Routing Modes
-
-Traffic reaches the runtime in three different ways.
-
-- `attach`
-  points macOS web and secure web proxies at the local listener using `networksetup`
-- `chrome`
-  launches a managed Chrome session with explicit proxy flags
-- `browser-deep`
-  launches a managed Chrome/Chromium session with the Chrome DevTools Protocol enabled, injects DOM listeners, and correlates actual page interactions to network requests
-
-Relevant files:
-
-- `src/attach.rs`
-- `src/chrome.rs`
-- `src/browser_deep.rs`
-- `src/system_proxy.rs`
-- `src/shutdown.rs`
-
-### 3. Interaction Attribution
-
-There are two interaction models in the codebase.
-
-- proxy interaction mode (`manual` / `auto`)
-  uses terminal arming or macOS global input hooks to correlate a request burst with a recent interaction window
-- browser-deep attribution
-  uses CDP `Runtime` + `Network` events and page-side listeners for `click`, `submit`, and `keydown`
-
-Browser-deep mode is the most accurate path for websites and Chromium-based apps because it attributes requests inside the browser runtime instead of inferring them only from timing.
-
-When `browser-deep` is used directly, it remains interaction-oriented by default.
-When it is used through Workflow Studio, the recorder enables full matching-request capture so page-load, login, and follow-on API traffic are preserved even when no DOM interaction is available for attribution.
-
-Relevant file:
-
-- `src/interaction.rs`
-
-### 4. Workflow Recording and Analysis
-
-The workflow system is a server-backed orchestration layer on top of capture.
-
-It records raw events to disk, normalizes them into operation-level events, builds a context map, then optionally sends the normalized workflow to an OpenAI Responses API backend for higher-level analysis and automation generation.
-
-Relevant files:
-
-- `src/workflow/server.rs`
-  localhost API and static asset host for the compiled React UI
-- `src/workflow/recorder.rs`
-  spawns and supervises recorder child processes, normalizes their output, and builds context maps
-- `src/workflow/store.rs`
-  persistent workflow session storage
-- `src/workflow/types.rs`
-  workflow, context-map, and automation schemas
-- `src/workflow/llm.rs`
-  OpenAI Responses API integration, Codex ChatGPT-backed execution via `codex exec`, and fallback generation when neither backend is available
-
-### 5. Workflow Studio UI
-
-The UI is a separate React application compiled with Vite and optionally wrapped by Electron.
-
-Relevant files:
-
-- `ui/src/App.jsx`
-  terminal-style workflow operator shell
-- `ui/src/styles.css`
-  monospace-first visual system
-- `ui/vite.config.js`
-  local dev server plus `/api` proxy to the Rust backend
-- `electron/main.cjs`
-  desktop shell that can spawn the Rust workflow server and load either the compiled localhost UI or the Vite dev server
-
-## Workflow Studio
-
-Workflow Studio is the localhost control plane for record -> stop -> analyze -> automate.
-
-When the server is running:
-
-- `POST /api/recordings/begin`
-  starts a workflow session
-- `POST /api/recordings/stop`
-  stops capture, normalizes events, and materializes a context map
-- `GET /api/sessions`
-  lists sessions
-- `GET /api/sessions/{session_id}`
-  returns session metadata plus the generated context map
-- `POST /api/sessions/{session_id}/ask`
-  sends a user prompt plus the recorded context to the automation generation path
-
-The UI served at `/` exposes the same flow:
-
-- begin recording
-- stop and analyze
-- inspect the generated context map
-- ask for an automation
-
-## Model Backend
-
-The workflow analysis path supports three backends:
-
-- `codex_chatgpt`
-  runs `codex exec` in an isolated temporary `CODEX_HOME` seeded from your local file-backed Codex `auth.json`, which lets the workflow system reuse the same ChatGPT/Codex login already present on the machine
-- `responses_api`
-  direct OpenAI Responses API access with `OPENAI_API_KEY`
-- `fallback`
-  deterministic local artifact generation when no model backend is configured
-
-Environment variables:
-
-- `WORKFLOW_LLM_BACKEND`
-  optional, one of `auto`, `codex`, `api`, or `none`
-- `OPENAI_API_KEY`
-  required for `responses_api`
-- `OPENAI_MODEL`
-  optional model override, also used by the Codex-backed path
-- `OPENAI_BASE_URL`
-  optional `responses_api` base URL, defaults to `https://api.openai.com/v1`
-- `WORKFLOW_CODEX_BIN`
-  optional `codex` binary path for the Codex-backed path
-- `WORKFLOW_CODEX_AUTH_FILE`
-  optional override for the file-backed Codex auth bundle, defaults to `~/.codex/auth.json`
-
-`auto` prefers the local Codex auth bundle when it exists, then falls back to `OPENAI_API_KEY`, then to deterministic local generation.
-
-The Codex-backed mode is intentionally implemented by invoking `codex exec` rather than by reusing ChatGPT OAuth tokens directly inside this app. That keeps the auth flow inside Codex's documented refresh/persistence path instead of turning this project into a separate generic OAuth client.
-
-If neither Codex auth nor `OPENAI_API_KEY` is available:
-
-- workflow recording still works
-- context-map generation still works
-- `workflow ask` falls back to deterministic local artifact generation instead of calling a model backend
-
-## Commands
-
-### Runtime Paths
-
-```bash
-cargo run -- paths
+```
+  use the app  ─────►  capture  ─────►  infer  ─────►  export
+  (Chrome or                exchanges     endpoints      openapi.json
+   a native app)            as JSON       + schemas      server.py (MCP)
+                            lines         + auth         call it live
 ```
 
-### CA Trust
+## The loop
 
 ```bash
-cargo run -- ca status
-cargo run -- ca trust
+reqtrace start https://hn.algolia.com/?query=rust   # a Chrome opens
+#   ... click around ...
+reqtrace stop
+# s1787284229: 35 requests -> 7 endpoints
+# post_indexes_item_dev_query: POST https://uj5wyc0l7x-dsn.algolia.net/1/indexes/Item_dev/query (1x)
+
+reqtrace show post_indexes_item_dev_query           # params, body schema, auth
+reqtrace call post_indexes_item_dev_query --body '{"query":"claude code"}'
+reqtrace export ./hn-api                            # openapi.json + a runnable MCP server
 ```
 
-### Proxy Capture
+Add `--headless` to `start` and drive the page yourself with `reqtrace open`
+and `reqtrace eval` — that is the unattended path, and it needs no window.
 
-Run the proxy directly:
+An agent does the same thing through the `reqtrace` MCP server. Same operations,
+same session directory, different names:
+
+| CLI | MCP tool |
+|---|---|
+| `reqtrace start` | `start_capture` |
+| `reqtrace open <url>` / `reqtrace eval <js>` | `navigate` / `evaluate` |
+| `reqtrace stop` | `stop_capture` |
+| `reqtrace show` | `list_endpoints` / `describe_endpoint` |
+| `reqtrace call` | `call_endpoint` |
+| `reqtrace export` | `export_mcp` |
+| `reqtrace sessions` / `reqtrace rm` | `list_sessions` / `forget_session` |
+| `reqtrace ca` | `ca_path` |
+
+## How it is built
+
+Two layers, split along a hard line: **Rust handles bytes, Python handles
+meaning.**
+
+| | |
+|---|---|
+| `capture/` (Rust, ~600 lines) | Everything that has to touch TLS, sockets and a browser. Emits one JSON line per HTTP exchange on stdout and nothing else. |
+| `reqtrace/` (Python, ~700 lines) | Everything that has to be understood, changed and extended: inference, replay, code generation, the agent surface. |
+
+The whole contract between them is one JSON object per line
+(`capture/src/event.rs`). That is why the Rust side has no config, no server, no
+state, and no model calls — it cannot grow.
+
+### The capture layer
+
+Two ways to see traffic, one output format:
+
+- **`browser`** launches a managed Chrome, enables the DevTools `Network`
+  domain, and injects a page script that reports clicks. Requests are attributed
+  to the UI action that caused them, so a capture reads as *this button calls
+  this endpoint*.
+- **`proxy`** terminates TLS with a leaf certificate from a local CA, forwards
+  upstream, and records the plaintext. This is how native desktop apps are
+  captured — they reach it through the macOS system proxy.
+
+Only the hosts you name are intercepted. Everything else is blind-tunnelled:
+never decrypted, never recorded, and reaching its real certificate untouched. So
+turning on the system proxy exposes the hosts you asked for and nothing else.
+
+### The pipeline
+
+| file | job |
+|---|---|
+| `events.py` | the captured exchange, and the one predicate that separates API calls from page furniture |
+| `cdp.py` | a tiny client for *driving* the captured tab — navigate and evaluate |
+| `api.py` | inference: group requests into endpoints, template out ids, merge schemas, spot auth headers |
+| `session.py` | start / stop a capture, own the session directory |
+| `call.py` | replay an endpoint, filling in whatever the caller did not specify |
+| `export.py` | OpenAPI 3.1, and a generated MCP server |
+| `server.py` | the MCP server an agent drives |
+| `cli.py` | the same operations for a human |
+
+Inference is deterministic — no model is involved anywhere. `/channels/8412/messages`
+and `/channels/9917/messages` become one endpoint
+`POST /channels/{channel_id}/messages` because the varying segment looks like an
+identifier, not because something guessed.
+
+That test is deliberately conservative: a segment has to look machine-generated.
+`/repos/octocat/Hello-World` stays literal, so two repositories give you two
+endpoints. Under-merging costs you a duplicate; over-merging fuses two different
+calls into one and breaks replay, so the bias goes this way on purpose.
+
+### Credentials
+
+Anything whose name looks like a credential — `authorization`, `cookie`, and any
+header *or query parameter* containing `key`, `token`, `secret`, `auth`,
+`session`, `sig` — has its value moved into `credentials.json` at mode 0600.
+Query strings count: plenty of services authenticate with `?api_key=`, and a
+scheme that only guarded headers would leak those into every export.
+
+The API description keeps names, never values — in endpoint fields, example
+URLs, and example bodies alike. Replay attaches the real values.
+**The agent can use the app's session without ever seeing the token.**
+
+## Install
 
 ```bash
-cargo run -- proxy --listen 127.0.0.1:8787 --output focused
+cargo build --release --manifest-path capture/Cargo.toml
+uv venv && uv pip install -e .
 ```
 
-Attach existing macOS apps that honor the system proxy:
+Set `REQTRACE_HOME` to move everything reqtrace stores (sessions, the CA,
+browser profiles) somewhere other than `~/.reqtrace`.
+
+For native apps there are two ways to make the proxy's certificate acceptable.
+Trust it system-wide once, which prompts for your password:
 
 ```bash
-cargo run -- attach \
-  --listen 127.0.0.1:8787 \
-  --service Wi-Fi \
-  --host-contains discord.com \
-  --output pretty
+reqtrace trust
 ```
 
-Managed Chrome through the proxy:
+Or leave the keychain alone and point individual clients at the certificate —
+`reqtrace ca` prints its path, creating it if needed:
 
 ```bash
-cargo run -- chrome \
-  --listen 127.0.0.1:8787 \
-  --open https://discord.com \
-  --host-contains discord.com \
-  --url-contains /api/ \
-  --output focused
+curl -x http://127.0.0.1:8787 --cacert "$(reqtrace ca)" https://api.github.com/repositories/1300192
 ```
 
-High-accuracy browser attribution via CDP:
+## Native apps
 
 ```bash
-cargo run -- browser-deep \
-  --open https://discord.com/channels/@me \
-  --host-contains discord.com \
-  --url-contains /api/ \
-  --user-data-dir /tmp/agent-mcp-b-discord-profile \
-  --output simple
+reqtrace start discord.com --mode proxy   # points the macOS system proxy here
+#   ... use Discord ...
+reqtrace stop
 ```
 
-### Workflow Studio
-
-Start the localhost server:
+`--no-system-proxy` leaves your network settings alone and expects you to route
+traffic yourself:
 
 ```bash
-cargo run -- workflow serve --listen 127.0.0.1:4317
+reqtrace start api.github.com --mode proxy --no-system-proxy
+curl -x http://127.0.0.1:8787 --cacert "$(reqtrace ca)" https://api.github.com/search/repositories?q=rust
+reqtrace stop
 ```
 
-Start a desktop workflow recording:
+That is the unattended path, and how the test suite drives a capture. `start`
+does not return until the capture is actually listening, so the next command
+cannot race it.
+
+`export` writes one OpenAPI document per host — `openapi.json` when a capture
+covers a single host, `openapi-<host>.json` each when it spans several, since
+`servers` is a document-level list and a mixed spec silently resolves every path
+against the first host.
+
+## On disk
+
+`~/.reqtrace/sessions/<id>/`
+
+```
+session.json       what was captured and how
+events.jsonl       raw exchanges, written live by the capture binary   0600
+api.json           the inferred API
+credentials.json   auth material                                      0600
+capture.log        the capture binary's stderr, when something is wrong
+```
+
+The session directory is 0700 and the raw capture is 0600, because
+`events.jsonl` is the least redacted thing here — full cookies, full tokens, and
+the bodies of logged-in pages. `reqtrace rm <id>` deletes a capture and its
+browser profile; they hold real credentials, so do not let them pile up.
+
+## Limits
+
+These are real, not temporary caveats hiding a bug:
+
+- macOS only (system proxy and keychain trust are `networksetup` / `security`).
+- One tab per browser capture. The capture attaches to a single page target, so
+  drive it with `navigate`/`evaluate` — a tab you open some other way is not
+  recorded.
+- Request-to-click attribution exists only in `browser` mode. Proxy captures
+  have no UI to attribute to.
+- Certificate-pinned apps will not decrypt through the proxy. Nothing here
+  defeats pinning.
+- `browser` mode is Chromium only.
+- Inference describes what was *observed*. An endpoint's optional fields are
+  invisible until something sends them.
+
+## Tests
 
 ```bash
-cargo run -- workflow begin \
-  --server 127.0.0.1:4317 \
-  --mode desktop \
-  --host-contains discord.com \
-  --url-contains /api/ \
-  --name "discord-session"
+pytest tests
 ```
 
-Start a browser-deep workflow recording:
-
-```bash
-cargo run -- workflow begin \
-  --server 127.0.0.1:4317 \
-  --mode browser_deep \
-  --open https://discord.com/channels/@me \
-  --user-data-dir /tmp/agent-mcp-b-discord-profile \
-  --host-contains discord.com \
-  --url-contains /api/ \
-  --methods GET,POST \
-  --name "discord-message-send"
-```
-
-Stop the active workflow:
-
-```bash
-cargo run -- workflow stop --server 127.0.0.1:4317
-```
-
-Inspect server status:
-
-```bash
-cargo run -- workflow status --server 127.0.0.1:4317
-```
-
-Ask the automation generator to synthesize an automation plan:
-
-```bash
-cargo run -- workflow ask \
-  --server 127.0.0.1:4317 \
-  --session-id wf-123 \
-  "Build an automation that replays the message send operation with a configurable payload."
-```
-
-Then open:
-
-- [http://127.0.0.1:4317/](http://127.0.0.1:4317/)
-
-### React / Electron UI
-
-Install the UI toolchain:
-
-```bash
-npm install
-```
-
-Build the compiled localhost UI that `workflow serve` hosts at `/`:
-
-```bash
-npm run ui:build
-```
-
-Run the Electron shell against a Rust workflow server plus the Vite dev server:
-
-```bash
-npm run electron:dev
-```
-
-Run the Electron shell against the compiled localhost UI:
-
-```bash
-npm run electron
-```
-
-## Data Model
-
-Each workflow session stores:
-
-- `session.json`
-  lifecycle metadata
-- `raw-events.jsonl`
-  recorder child-process event stream
-- `normalized-events.json`
-  normalized request/interaction records
-- `context-map.json`
-  summarized domains, operations, reads, writes, and interaction-to-operation edges
-- `generated/`
-  generated automation artifacts
-
-For desktop sessions, `session.json` also records the active local recorder endpoint so test harnesses and agent tooling can drive traffic through the workflow recorder deterministically while the session is active.
-
-The workflow context map captures:
-
-- domains touched by the workflow
-- operation signatures such as `POST discord.com/api/v9/channels/:id/messages`
-- request/response summaries
-- auth material signals like `authorization`, `cookie`, or `set-cookie`
-- interaction edges showing which click/keydown likely triggered which operations
-- optional LLM-generated analysis
-
-## Testing and Verification
-
-Unit and integration checks:
-
-```bash
-cargo test
-cargo check
-```
-
-Proxy smoke matrix:
-
-```bash
-bash ./scripts/smoke-eval-sites.sh
-```
-
-Workflow end-to-end eval:
-
-```bash
-bash ./scripts/workflow-e2e.sh
-```
-
-Authenticated workflow end-to-end eval:
-
-```bash
-bash ./scripts/workflow-auth-e2e.sh
-```
-
-Desktop workflow end-to-end eval:
-
-```bash
-bash ./scripts/workflow-desktop-e2e.sh
-```
-
-The workflow e2e script verifies:
-
-- workflow server startup
-- compiled localhost UI rendering
-- browser-deep recording against a local fixture page
-- raw event capture
-- context-map generation
-- automation generation output through the active model backend
-
-## Operational Limits
-
-Current limits are explicit:
-
-- `desktop` workflow mode is only as broad as the system proxy path; apps that ignore the proxy will not be captured
-- apps with certificate pinning will not be transparently decrypted
-- browser-deep attribution is for managed Chromium sessions, not arbitrary native apps
-- the LLM automation layer currently generates plans and artifacts; it is not yet a full autonomous executor that patches arbitrary external systems safely on its own
-
-That said, the repo now contains the full first-pass pipeline for:
-
-- record
-- normalize
-- map
-- analyze
-- ask for an automation
-- inspect the result through a local UI
+The suite runs a real capture — proxy, fixture API, inference, export, and it
+compiles the generated MCP server.
