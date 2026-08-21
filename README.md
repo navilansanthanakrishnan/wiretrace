@@ -1,10 +1,5 @@
 # wiretrace
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-black.svg)
-![Rust](https://img.shields.io/badge/rust-2024-black.svg)
-![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
-
 Reverse-engineer any app into a callable API by capturing its traffic.
 
 wiretrace watches the HTTP an application makes while it is used, reverse-engineers
