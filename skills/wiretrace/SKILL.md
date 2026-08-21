@@ -14,7 +14,8 @@ was going to make anyway: no selectors, no DOM, no re-driving the UI every run.
 | Situation | Do this |
 |---|---|
 | User can export a HAR from DevTools | `import_har` — no proxy, no certificate, nothing installed |
-| Website, user is logged in or will log in | `start_capture(url)` — browser mode |
+| Website the user is **already** signed into | HAR, or `proxy` mode — see the warning below |
+| Website the user will sign into fresh | `start_capture(url)` — browser mode |
 | Native app, CLI, or script | `start_capture(host, mode="proxy")` |
 | You want to drive it yourself unattended | `mode="proxy", system_proxy=False`, then route your own `curl` through it |
 

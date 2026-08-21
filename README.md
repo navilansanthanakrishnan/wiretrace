@@ -1,5 +1,10 @@
 # wiretrace
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-black.svg)
+![Rust](https://img.shields.io/badge/rust-2024-black.svg)
+![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
+
 Reverse-engineer any app into a callable API by capturing its traffic.
 
 wiretrace watches the HTTP an application makes while it is used, reverse-engineers
@@ -10,6 +15,13 @@ no DOM to scrape, no selectors to maintain.
 
 Works on anything that speaks HTTP: web apps, native desktop apps, CLIs, and
 back-office portals that never shipped an API.
+
+![wiretrace](docs/screenshot.png)
+
+*Discord's messaging API, recovered from a live session. wiretrace templated the
+channel id out of the path, kept the auth header name without its value, and
+worked out from the traffic alone that sending an attachment requires calling
+`/attachments` first and reusing the filename it returns.*
 
 ```
   use the app  ─────►  capture  ─────►  infer  ─────►  export
@@ -288,7 +300,12 @@ These are real, not temporary caveats hiding a bug:
   have no UI to attribute to.
 - Certificate-pinned apps will not decrypt through the proxy. Nothing here
   defeats pinning.
-- `browser` mode is Chromium only.
+- `browser` mode is Chromium only, and launches a *fresh* profile — so it is not
+  logged into anything. Some apps cannot be re-authenticated in a new profile at
+  all: Discord's web client holds its token in memory and deletes
+  `window.localStorage`, so a new tab lands on the login page. For an app you are
+  already signed into, capture the session you have — import a HAR from your own
+  browser, or use `proxy` mode.
 - Inference describes what was *observed*. An endpoint's optional fields are
   invisible until something sends them.
 
