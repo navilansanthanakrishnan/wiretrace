@@ -1,11 +1,15 @@
 # wiretrace
 
-Watch an application, learn its API, hand it to an agent.
+Reverse-engineer any app into a callable API by capturing its traffic.
 
-wiretrace observes the HTTP traffic a real app makes while it is used, works out
-what API is behind that traffic, and turns the result into something callable —
-an OpenAPI document, live replay, or a standalone MCP server. No documentation,
-no reverse engineering, no scraping. Just use the app, then stop.
+wiretrace watches the HTTP an application makes while it is used, reverse-engineers
+the API behind that traffic — endpoints, path parameters, schemas, auth, and the
+dependencies between calls — and turns it into something you can call: an OpenAPI
+document, live replay, or a standalone MCP server an agent drives. No docs to read,
+no DOM to scrape, no selectors to maintain.
+
+Works on anything that speaks HTTP: web apps, native desktop apps, CLIs, and
+back-office portals that never shipped an API.
 
 ```
   use the app  ─────►  capture  ─────►  infer  ─────►  export
@@ -59,6 +63,20 @@ wiretrace only watches. Clicking, typing and navigating are a separate job, done
 by [open-computer-use](https://github.com/NavilanSanthanakrishnan/open-computer-use)
 and its `computer-use` skill. Keeping the two apart is why wiretrace has no idea
 what a button is: it sees requests, nothing else.
+
+## Optional viewer
+
+```bash
+wiretrace ui        # http://127.0.0.1:4317
+```
+
+A localhost page listing captures, their endpoints and inferred shapes, with a
+box to call one. Stdlib HTTP and a single HTML file — no framework, no build
+step, nothing to install — because a viewer that needs its own toolchain is a
+worse deal than reading `api.json`. Telemetry and health checks are dimmed
+rather than hidden.
+
+It is genuinely optional. The agent path never touches it.
 
 ## Using it from a coding agent
 
@@ -133,6 +151,7 @@ turning on the system proxy exposes the hosts you asked for and nothing else.
 | `export.py` | OpenAPI 3.1, and a generated MCP server |
 | `server.py` | the MCP server an agent drives |
 | `cli.py` | the same operations for a human |
+| `ui.py`, `ui.html` | the optional localhost viewer |
 
 Inference is deterministic — no model is involved anywhere. `/channels/8412/messages`
 and `/channels/9917/messages` become one endpoint

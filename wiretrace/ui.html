@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wiretrace</title>
+<style>
+  :root {
+    --bg: #0a0a0a; --panel: #101010; --line: #242424;
+    --text: #d4d4d4; --dim: #6e6e6e; --bright: #f0f0f0;
+  }
+  * { box-sizing: border-box; border-radius: 0; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    border-bottom: 1px solid var(--line); padding: 10px 14px;
+    display: flex; gap: 14px; align-items: baseline;
+  }
+  header b { color: var(--bright); font-weight: 600; letter-spacing: .04em; }
+  header span { color: var(--dim); }
+  main { display: grid; grid-template-columns: 260px 1fr; height: calc(100vh - 42px); }
+  nav { border-right: 1px solid var(--line); overflow: auto; }
+  section { overflow: auto; padding: 14px; }
+  .row {
+    padding: 9px 14px; border-bottom: 1px solid var(--line);
+    cursor: pointer; color: var(--dim);
+  }
+  .row:hover { background: var(--panel); }
+  .row[aria-selected="true"] { background: var(--panel); color: var(--bright); box-shadow: inset 2px 0 0 var(--text); }
+  .row b { display: block; color: var(--text); font-weight: 500; }
+  .row[aria-selected="true"] b { color: var(--bright); }
+  .live { color: var(--bright); }
+  article { border: 1px solid var(--line); margin-bottom: 10px; background: var(--panel); }
+  article > summary { padding: 9px 12px; cursor: pointer; list-style: none; display: flex; gap: 10px; }
+  article > summary::-webkit-details-marker { display: none; }
+  .method { color: var(--bright); min-width: 52px; }
+  .url { color: var(--text); word-break: break-all; flex: 1; }
+  .count { color: var(--dim); }
+  .body { border-top: 1px solid var(--line); padding: 12px; }
+  dl { display: grid; grid-template-columns: 118px 1fr; gap: 5px 12px; margin: 0 0 12px; }
+  dt { color: var(--dim); } dd { margin: 0; word-break: break-all; }
+  textarea, button {
+    font: inherit; background: #000; color: var(--text);
+    border: 1px solid var(--line); padding: 7px 9px;
+  }
+  textarea { width: 100%; min-height: 62px; resize: vertical; }
+  button { cursor: pointer; color: var(--bright); }
+  button:hover { background: var(--panel); }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 10px 0 0;
+        max-height: 320px; overflow: auto; color: var(--dim); }
+  .warn { color: var(--bright); border-left: 2px solid var(--text); padding-left: 8px; }
+  .empty { color: var(--dim); padding: 24px 14px; }
+  .endpoint[data-noise="true"] { opacity: .45; }
+  .endpoint[data-noise="true"] .method { color: var(--dim); }
+  .tag { color: var(--dim); }
+</style>
+
+<header><b>wiretrace</b><span id="subtitle">reverse-engineered APIs</span></header>
+<main>
+  <nav id="sessions"></nav>
+  <section id="detail"><p class="empty">select a capture</p></section>
+</main>
+
+<script>
+const get = (url) => fetch(url).then((r) => r.json());
+const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+let current = null;
+
+async function loadSessions() {
+  const list = await get("/api/sessions");
+  const nav = document.getElementById("sessions");
+  if (!list.length) { nav.innerHTML = '<p class="empty">no captures yet</p>'; return; }
+  nav.innerHTML = list.map((s) => `
+    <div class="row" data-id="${esc(s.id)}" aria-selected="${s.id === current}">
+      <b>${esc(s.target)}</b>
+      ${esc(s.mode)} · ${s.recording ? '<span class="live">recording</span>' : esc(s.id)}
+    </div>`).join("");
+  nav.querySelectorAll(".row").forEach((row) =>
+    row.onclick = () => { current = row.dataset.id; loadSessions(); loadDetail(current); });
+}
+
+async function loadDetail(id) {
+  const data = await get(`/api/sessions/${id}`);
+  document.getElementById("subtitle").textContent =
+    `${data.requests} requests → ${data.endpoints.length} endpoints`;
+  document.getElementById("detail").innerHTML = data.endpoints.map(endpoint).join("")
+    || '<p class="empty">no API calls in this capture</p>';
+}
+
+function endpoint(e) {
+  const fields = (schema) => Object.keys(schema?.properties || {}).join(", ") || "—";
+  const needs = e.depends_on.map((d) =>
+    `${esc(d.parameter)} ← ${esc(d.from_endpoint)}.${esc(d.from_field)}`).join("<br>") || "—";
+  return `<details class="endpoint" data-id="${esc(e.id)}" data-noise="${!!e.noise}">
+    <summary>
+      <span class="method">${esc(e.method)}</span>
+      <span class="url">${esc(e.host)}${esc(e.path)}</span>
+      <span class="count">${e.calls}×</span>
+      ${e.noise ? '<span class="tag">telemetry</span>' : ""}
+    </summary>
+    <div class="body">
+      <dl>
+        <dt>id</dt><dd>${esc(e.id)}</dd>
+        <dt>path params</dt><dd>${esc(e.path_params.join(", ")) || "—"}</dd>
+        <dt>query</dt><dd>${esc(Object.keys(e.query_params).join(", ")) || "—"}</dd>
+        <dt>body</dt><dd>${esc(fields(e.body_schema))}</dd>
+        <dt>returns</dt><dd>${esc(fields(e.response_schema))}</dd>
+        <dt>auth</dt><dd>${esc(e.auth.join(", ")) || "none"}</dd>
+        <dt>needs first</dt><dd>${needs}</dd>
+        <dt>triggered by</dt><dd>${esc(e.triggers[0] || "—")}</dd>
+      </dl>
+      <textarea placeholder='{"path_params": {}, "query": {}, "body": {}}  — omit anything to reuse the capture'></textarea>
+      <p><button>call ${esc(e.method)}</button>
+      ${e.method === "GET" ? "" : '<span class="warn">not a read — this changes real data</span>'}</p>
+      <pre></pre>
+    </div>
+  </details>`;
+}
+
+document.addEventListener("click", async (event) => {
+  if (event.target.tagName !== "BUTTON") return;
+  const box = event.target.closest(".body");
+  const id = event.target.closest(".endpoint").dataset.id;
+  const method = event.target.textContent.replace("call ", "").trim();
+  if (method !== "GET" && !confirm(`${method} runs against the live service as you. Continue?`)) return;
+
+  const pre = box.querySelector("pre");
+  pre.textContent = "calling…";
+  let payload = {};
+  try { payload = JSON.parse(box.querySelector("textarea").value || "{}"); }
+  catch { pre.textContent = "the arguments box is not valid JSON"; return; }
+
+  const result = await fetch("/api/call", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session: current, endpoint: id, ...payload }),
+  }).then((r) => r.json());
+  pre.textContent = `${result.status} ${result.url}\n\n${result.body}`;
+});
+
+loadSessions();
+setInterval(loadSessions, 5000);
+</script>

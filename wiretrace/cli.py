@@ -29,6 +29,8 @@ def main() -> None:
 
     sub.add_parser("stop", help="end the capture and infer the API")
     sub.add_parser("sessions", help="list captures")
+    view = sub.add_parser("ui", help="open a localhost viewer for captured APIs")
+    view.add_argument("--port", type=int, default=4317)
     check = sub.add_parser("verify", help="check the captured credentials still work")
     check.add_argument("--session")
     sub.add_parser("trust", help="install the local CA into the login keychain")
@@ -92,6 +94,11 @@ def dispatch(args: argparse.Namespace) -> str:
             )
         case "verify":
             return probe(sessions.resolve(args.session))
+        case "ui":
+            from .ui import serve
+
+            serve(port=args.port)
+            return "ui stopped"
         case "sessions":
             return "\n".join(
                 f"{s.id}  {'recording' if s.recording else 'stopped':<9} {s.mode:<7} {s.target}"
