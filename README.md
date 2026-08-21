@@ -24,7 +24,7 @@ reqtrace stop
 # post_indexes_item_dev_query: POST https://uj5wyc0l7x-dsn.algolia.net/1/indexes/Item_dev/query (1x)
 
 reqtrace show post_indexes_item_dev_query           # params, body schema, auth
-reqtrace call post_indexes_item_dev_query --body '{"query":"claude code"}'
+reqtrace call post_indexes_item_dev_query --body '{"query":"zig comptime"}'
 reqtrace export ./hn-api                            # openapi.json + a runnable MCP server
 ```
 
@@ -127,9 +127,12 @@ reqtrace --help
 Set `REQTRACE_HOME` to move everything reqtrace stores (sessions, the CA,
 browser profiles) somewhere other than `~/.reqtrace`.
 
-To give an agent the tools, register the MCP server. In Claude Code the bundled
-`.mcp.json` does it for you when you open the repo; anywhere else, run
-`reqtrace-mcp` over stdio.
+To give an agent the tools, register `reqtrace-mcp` with any MCP client. It
+speaks stdio:
+
+```json
+{"mcpServers": {"reqtrace": {"command": "reqtrace-mcp"}}}
+```
 
 For native apps there are two ways to make the proxy's certificate acceptable.
 Trust it system-wide once, which prompts for your password:

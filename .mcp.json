@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "reqtrace": {
-      "command": "uv",
-      "args": ["run", "--project", "${CLAUDE_PROJECT_DIR}", "reqtrace-mcp"]
-    }
-  }
-}
