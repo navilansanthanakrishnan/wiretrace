@@ -22,7 +22,7 @@ from mcp.server.mcpserver import MCPServer
 
 from . import session as sessions
 from . import system
-from .call import call
+from .call import call, probe
 from .export import export, signature
 
 mcp = MCPServer("wiretrace", instructions=__doc__)
@@ -129,6 +129,16 @@ def call_endpoint(
     session = sessions.resolve(session_id)
     result = call(session, endpoint_id, path_params, query, body, headers)
     return f"{result['status']} {result['url']}\n{result['body']}"
+
+
+@mcp.tool()
+def verify_session(session_id: str | None = None) -> str:
+    """Check the captured credentials still authenticate, before relying on them.
+
+    Replays the safest observed read. Do this before exporting an MCP server for
+    someone else to use, and whenever a call starts returning 401 or 403.
+    """
+    return probe(sessions.resolve(session_id))
 
 
 @mcp.tool()

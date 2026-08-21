@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import session as sessions
 from . import system
-from .call import call
+from .call import call, probe
 from .export import export
 
 
@@ -29,6 +29,8 @@ def main() -> None:
 
     sub.add_parser("stop", help="end the capture and infer the API")
     sub.add_parser("sessions", help="list captures")
+    check = sub.add_parser("verify", help="check the captured credentials still work")
+    check.add_argument("--session")
     sub.add_parser("trust", help="install the local CA into the login keychain")
     sub.add_parser("ca", help="print the CA certificate path, for clients you point at it yourself")
 
@@ -88,6 +90,8 @@ def dispatch(args: argparse.Namespace) -> str:
                 [f"{session.id}: {session.seen()} requests -> {len(api.endpoints)} endpoints"]
                 + [endpoint.summary() for endpoint in api.endpoints]
             )
+        case "verify":
+            return probe(sessions.resolve(args.session))
         case "sessions":
             return "\n".join(
                 f"{s.id}  {'recording' if s.recording else 'stopped':<9} {s.mode:<7} {s.target}"

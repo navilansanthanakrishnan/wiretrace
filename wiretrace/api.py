@@ -12,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from urllib.parse import unquote
 
+from .dataflow import link
 from .events import Exchange
 
 #: Any header or query parameter whose name contains one of these is treated as
@@ -138,6 +139,8 @@ class Endpoint:
     response_schema: dict | None = None
     #: Names only — the values live in the session's private credential store.
     auth: list[str] = field(default_factory=list)
+    #: Calls whose output this one consumes: [{parameter, from_endpoint, from_field}].
+    depends_on: list[dict] = field(default_factory=list)
     statuses: list[int] = field(default_factory=list)
     calls: int = 0
     triggers: list[str] = field(default_factory=list)
@@ -166,6 +169,8 @@ class Endpoint:
             ("body fields", list((self.body_schema or {}).get("properties", {}))),
             ("returns", list((self.response_schema or {}).get("properties", {}))),
             ("auth", self.auth),
+            ("needs first", [f"{d['parameter']} <- {d['from_endpoint']}.{d['from_field']}"
+                             for d in self.depends_on]),
             ("triggered by", self.triggers),
         ):
             if names:
@@ -201,7 +206,7 @@ class Api:
 
 def infer(exchanges: list[Exchange]) -> Api:
     """Fold captured exchanges into one endpoint per distinct call shape."""
-    api, by_key = Api(), {}
+    api, by_key, observations = Api(), {}, []
 
     for exchange in exchanges:
         if not exchange.is_api():
@@ -220,6 +225,7 @@ def infer(exchanges: list[Exchange]) -> Api:
             )
             api.endpoints.append(endpoint)
 
+        observations.append((exchange, endpoint))
         endpoint.calls += 1
         if exchange.status not in endpoint.statuses:
             endpoint.statuses.append(exchange.status)
@@ -252,6 +258,8 @@ def infer(exchanges: list[Exchange]) -> Api:
             if label not in endpoint.triggers:
                 endpoint.triggers.append(label)
 
+    # Ordering matters: an edge only counts if the producer was seen first.
+    link(observations)
     for endpoint in api.endpoints:
         endpoint.body_example = redact(endpoint.body_example)
     disambiguate(api.endpoints)

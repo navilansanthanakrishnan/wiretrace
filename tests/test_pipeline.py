@@ -18,9 +18,9 @@ import pytest
 os.environ["WIRETRACE_HOME"] = tempfile.mkdtemp(prefix="wiretrace-test-")
 
 from wiretrace import session as sessions  # noqa: E402
-from wiretrace.api import infer, looks_like_id, templatize  # noqa: E402
+from wiretrace.api import Endpoint, infer, looks_like_id, templatize  # noqa: E402
 from wiretrace.events import Exchange  # noqa: E402
-from wiretrace.export import export, openapi  # noqa: E402
+from wiretrace.export import export, openapi, python_name, tool_source  # noqa: E402
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -184,6 +184,55 @@ def test_har_import_matches_a_live_capture(tmp_path):
     assert endpoint.auth == ["authorization"]
     assert "SEKRIT" not in json.dumps(api.to_dict())
     assert json.loads((session.dir / "credentials.json").read_text())["x.com"]["authorization"]
+
+
+def test_dataflow_links_a_call_to_its_producer():
+    """The id in a request came from somewhere; that edge is what makes replay honest."""
+    def exchange(method, url, response, body=None):
+        return Exchange(0, "proxy", method, url, {}, body, 200,
+                        {"content-type": "application/json"}, response, 1, None)
+
+    api = infer([
+        exchange("GET", "https://x.com/api/guilds",
+                 '{"guilds": [{"id": "841212991234", "name": "general"}]}'),
+        exchange("POST", "https://x.com/api/channels/841212991234/messages",
+                 '{"ok": true}', '{"content": "hello"}'),
+    ])
+
+    post = api.get("post_api_channels_messages")
+    assert post.depends_on == [
+        {"parameter": "channel_id", "from_endpoint": "get_api_guilds",
+         "from_field": "guilds[].id"}
+    ]
+    # The producer does not depend on its own consumer.
+    assert api.get("get_api_guilds").depends_on == []
+
+
+def test_generated_tools_have_real_signatures(tmp_path):
+    """An opaque dict parameter throws away the schema we just inferred."""
+    endpoint = Endpoint(
+        id="post_messages", method="POST", host="x.com",
+        path="/api/channels/{channel_id}/messages",
+        path_params=["channel_id"],
+        body_schema={"type": "object", "properties": {
+            "content": {"type": "string"}, "tts": {"type": "boolean"},
+            "class": {"type": "string"}, "x-weird.name": {"type": "string"}}},
+    )
+    source = tool_source(endpoint)
+
+    assert "def post_messages(channel_id: str" in source
+    assert "content: str | None = None" in source
+    assert "tts: bool | None = None" in source
+    # Python keywords and non-identifier field names must still bind to the wire name.
+    assert "class_: str | None = None" in source and '"class": class_' in source
+    assert "x_weird_name: str | None = None" in source and '"x-weird.name": x_weird_name' in source
+    compile(source.replace("@mcp.tool()", ""), "tool.py", "exec")
+
+
+def test_python_name_avoids_collisions():
+    taken = set()
+    assert [python_name(n, taken) for n in ("a-b", "a.b", "from", "1st")] == \
+        ["a_b", "a_b_", "from_", "st"]
 
 
 def test_is_api_skips_page_furniture():

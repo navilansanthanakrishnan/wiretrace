@@ -50,6 +50,8 @@ same session directory, different names:
 | `wiretrace show` | `list_endpoints` / `describe_endpoint` |
 | `wiretrace call` | `call_endpoint` |
 | `wiretrace export` | `export_mcp` |
+| `wiretrace import` | `import_har` |
+| `wiretrace verify` | `verify_session` |
 | `wiretrace sessions` / `wiretrace rm` | `list_sessions` / `forget_session` |
 | `wiretrace ca` | `ca_path` |
 
@@ -57,6 +59,14 @@ wiretrace only watches. Clicking, typing and navigating are a separate job, done
 by [open-computer-use](https://github.com/NavilanSanthanakrishnan/open-computer-use)
 and its `computer-use` skill. Keeping the two apart is why wiretrace has no idea
 what a button is: it sees requests, nothing else.
+
+## Using it from a coding agent
+
+`skills/wiretrace/` is a portable agent skill: copy it wherever your agent loads
+skills from (`~/.claude/skills/` for Claude Code) and register `wiretrace-mcp`
+as an MCP server. After that the user says "turn this portal into an API" and
+the agent knows the whole procedure — which capture mode fits, how many samples
+inference needs, how to read a dependency edge, and what a 401 actually means.
 
 ## How it compares
 
@@ -73,6 +83,8 @@ the same HAR files, so anything you can do there you can do here.
 | Call an endpoint back | no | yes, with the captured session |
 | Credentials | warns they may end up in the schema | moved to a 0600 store, kept out of the schema |
 | Which click caused which request | — | recorded in browser captures |
+| Call dependencies between endpoints | — | recovered by dataflow analysis |
+| Typed tool schemas for agents | — | generated from inferred body schemas |
 
 The difference in intent: mitmproxy2swagger documents an API, wiretrace makes one
 usable. If you want a spec to read, either will do. If you want something an
@@ -113,7 +125,9 @@ turning on the system proxy exposes the hosts you asked for and nothing else.
 | file | job |
 |---|---|
 | `events.py` | the captured exchange, and the one predicate that separates API calls from page furniture |
-| `api.py` | inference: group requests into endpoints, template out ids, merge schemas, spot auth headers |
+| `api.py` | inference: group requests into endpoints, template out ids, merge schemas, spot auth |
+| `dataflow.py` | which call feeds which — the values one response produced and a later request consumed |
+| `har.py` | read a DevTools HAR as if we had captured it |
 | `session.py` | start / stop a capture, own the session directory |
 | `call.py` | replay an endpoint, filling in whatever the caller did not specify |
 | `export.py` | OpenAPI 3.1, and a generated MCP server |
@@ -129,6 +143,23 @@ That test is deliberately conservative: a segment has to look machine-generated.
 `/repos/octocat/Hello-World` stays literal, so two repositories give you two
 endpoints. Under-merging costs you a duplicate; over-merging fuses two different
 calls into one and breaks replay, so the bias goes this way on purpose.
+
+### Dependencies between calls
+
+A request usually carries values it did not invent — a channel id from a guild
+listing, a CSRF token from a page load. Replaying such a call in isolation works
+until the value goes stale, and then it fails looking like broken auth.
+
+`dataflow.py` indexes every scalar a response produced and checks every later
+request against that index. A hit is an edge:
+
+```
+needs first: channel_id <- get_guilds.guilds[].id
+```
+
+It is an observation, not a guess: the value either appeared in an earlier
+response or it did not. Edges land in `describe_endpoint`, the generated tool's
+docstring, and `api.json`.
 
 ### Credentials
 

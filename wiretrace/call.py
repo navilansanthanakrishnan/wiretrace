@@ -76,6 +76,50 @@ def call(
     }
 
 
+def probe(session: Session) -> str:
+    """Checks whether the captured session still authenticates.
+
+    Captured credentials go stale — that is the normal failure mode of a
+    replayed API, and it is indistinguishable from a bad capture unless you
+    test it. Replays the safest observed read and reports what came back.
+    """
+    safe = [
+        endpoint
+        for endpoint in session.api().useful()
+        if endpoint.method == "GET" and any(200 <= s < 300 for s in endpoint.statuses)
+    ]
+    if not safe:
+        return "no safe read to probe with; this capture has no successful GET"
+
+    endpoint = max(safe, key=lambda e: (len(e.auth), e.calls))
+    try:
+        result = call(session, endpoint.id)
+    except Exception as error:
+        return f"probe failed: {error}"
+
+    status = result["status"]
+    if status in (401, 403):
+        return (f"credentials expired — {endpoint.id} returned {status}. "
+                "Capture again while logged in.")
+    if not 200 <= status < 300:
+        return f"{endpoint.id} returned {status}; the endpoint may have changed"
+
+    # A 200 is not proof. An expired session very often returns a login page with
+    # a perfectly cheerful status code, so check the shape came back too.
+    if endpoint.response_schema and not parses(result["body"]):
+        return (f"{endpoint.id} returned {status} but not the JSON that was captured — "
+                "this is what an expired session looks like when it redirects to a login page")
+    return f"credentials valid — {endpoint.id} returned {status}"
+
+
+def parses(body: str) -> bool:
+    try:
+        json.loads(body)
+        return True
+    except ValueError:
+        return False
+
+
 def fill(endpoint: Endpoint, values: dict[str, str]) -> str:
     """Substitutes `{name}` path parameters, falling back to values seen in capture."""
     path = endpoint.path
