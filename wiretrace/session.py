@@ -1,6 +1,6 @@
 """A capture session: start observing, stop, keep the result on disk.
 
-Layout of `~/.reqtrace/sessions/<id>/`:
+Layout of `~/.wiretrace/sessions/<id>/`:
 
     session.json      what was captured and how
     events.jsonl      raw exchanges, written live by the capture binary
@@ -24,7 +24,7 @@ from . import system
 from .api import Api, infer
 from .events import read
 
-HOME = Path(os.environ.get("REQTRACE_HOME", Path.home() / ".reqtrace"))
+HOME = Path(os.environ.get("WIRETRACE_HOME", Path.home() / ".wiretrace"))
 SESSIONS, CERTS, PROFILES = HOME / "sessions", HOME / "certs", HOME / "profiles"
 
 
@@ -33,13 +33,13 @@ def capture_binary() -> Path:
     override = os.environ.get("REQTRACE_CAPTURE_BIN")
     candidates = [
         Path(override) if override else None,
-        Path(__file__).parent.parent / "capture/target/release/reqtrace-capture",
-        Path(shutil.which("reqtrace-capture") or "/nonexistent"),
+        Path(__file__).parent.parent / "capture/target/release/wiretrace-capture",
+        Path(shutil.which("wiretrace-capture") or "/nonexistent"),
     ]
     for candidate in candidates:
         if candidate and candidate.exists():
             return candidate
-    raise RuntimeError("reqtrace-capture not built; run: cargo build --release --manifest-path capture/Cargo.toml")
+    raise RuntimeError("wiretrace-capture not built; run: cargo build --release --manifest-path capture/Cargo.toml")
 
 
 @dataclass
@@ -172,7 +172,7 @@ def start(
         raise RuntimeError(f"unknown mode {mode!r}; use browser or proxy")
 
     # Raw exchanges hold cookies and tokens verbatim — the least redacted thing
-    # reqtrace writes, so it gets the tightest mode.
+    # wiretrace writes, so it gets the tightest mode.
     session.events_path.touch(mode=0o600)
     with session.events_path.open("w") as events, (directory / "capture.log").open("w") as log:
         child = subprocess.Popen(command, stdout=events, stderr=log)
@@ -200,6 +200,25 @@ def claim(port: int) -> None:
             probe.bind(("127.0.0.1", port))
         except OSError as error:
             raise RuntimeError(f"port {port} is busy; start again with a different --port") from error
+
+
+def ingest(path: Path) -> Session:
+    """Creates a finished session from a HAR file, no capture involved."""
+    from .har import load
+
+    exchanges = load(path)
+    session_id = f"s{int(time.time())}"
+    directory = SESSIONS / session_id
+    directory.mkdir(parents=True, mode=0o700)
+    session = Session(id=session_id, dir=directory, target=path.name, mode="har", stopped=True)
+
+    session.events_path.touch(mode=0o600)
+    with session.events_path.open("w") as handle:
+        for item in exchanges:
+            handle.write(json.dumps(vars(item)) + "\n")
+    session.save()
+    session.reinfer()
+    return session
 
 
 def hostname(target: str) -> str:

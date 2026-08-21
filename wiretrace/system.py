@@ -1,6 +1,6 @@
 """macOS glue: system proxy settings and CA trust.
 
-Native apps have no idea reqtrace exists; they reach the proxy because the OS
+Native apps have no idea wiretrace exists; they reach the proxy because the OS
 tells them to. That is the whole of what this module does.
 """
 
@@ -42,7 +42,7 @@ def clear_proxy(service: str) -> None:
 
 def ca_trusted() -> bool:
     trust = subprocess.run(["security", "dump-trust-settings"], capture_output=True, text=True)
-    return "reqtrace local CA" in trust.stdout
+    return "wiretrace local CA" in trust.stdout
 
 
 def trust_ca(cert: Path) -> None:

@@ -1,4 +1,4 @@
-//! reqtrace capture layer.
+//! wiretrace capture layer.
 //!
 //! Two ways to observe an application's HTTP traffic, one output format.
 //! Orchestration, inference and the agent-facing surface live in Python; this
@@ -16,7 +16,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "reqtrace-capture", about = "Emit one JSON line per HTTP exchange")]
+#[command(name = "wiretrace-capture", about = "Emit one JSON line per HTTP exchange")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

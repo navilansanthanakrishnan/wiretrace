@@ -13,7 +13,7 @@ from .export import export
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser("reqtrace", description="Watch an app, learn its API.")
+    parser = argparse.ArgumentParser("wiretrace", description="Watch an app, learn its API.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     start = sub.add_parser("start", help="begin a capture")
@@ -23,6 +23,9 @@ def main() -> None:
     start.add_argument("--no-system-proxy", action="store_false", dest="system_proxy")
     start.add_argument("--headless", action="store_true", help="browser mode without a window")
     start.add_argument("--port", type=int, default=0, help="proxy port, or Chrome's debug port")
+
+    load = sub.add_parser("import", help="infer an API from a HAR file, with no capture")
+    load.add_argument("har", help="a .har exported from browser DevTools")
 
     sub.add_parser("stop", help="end the capture and infer the API")
     sub.add_parser("sessions", help="list captures")
@@ -54,7 +57,7 @@ def main() -> None:
     try:
         print(dispatch(args))
     except RuntimeError as error:
-        raise SystemExit(f"reqtrace: {error}")
+        raise SystemExit(f"wiretrace: {error}")
 
 
 def dispatch(args: argparse.Namespace) -> str:
@@ -69,6 +72,13 @@ def dispatch(args: argparse.Namespace) -> str:
                 port=args.port,
             )
             return f"recording {session.id} ({session.mode}) -> {session.target} on port {session.port}"
+        case "import":
+            session = sessions.ingest(Path(args.har).expanduser())
+            api = session.api()
+            return "\n".join(
+                [f"{session.id}: {session.seen()} requests -> {len(api.endpoints)} endpoints"]
+                + [endpoint.summary() for endpoint in api.endpoints]
+            )
         case "stop":
             session = sessions.current()
             if session is None:

@@ -1,9 +1,9 @@
-"""reqtrace watches an application and tells you what API it is really calling.
+"""wiretrace watches an application and tells you what API it is really calling.
 
 The loop: start_capture, use the app, stop_capture, then read the endpoints it
 inferred, call one for real, and keep the result as a standalone MCP server.
 
-reqtrace only observes. It does not click, type or navigate — drive the app with
+wiretrace only observes. It does not click, type or navigate — drive the app with
 the computer-use skill (open-computer-use), which is linked at
 `open-computer-use/` in this repo. Run captures with a visible window so it has
 something to drive.
@@ -25,7 +25,7 @@ from . import system
 from .call import call
 from .export import export, signature
 
-mcp = MCPServer("reqtrace", instructions=__doc__)
+mcp = MCPServer("wiretrace", instructions=__doc__)
 
 
 @mcp.tool()
@@ -65,6 +65,20 @@ def start_capture(
         else route_hint(session, system_proxy)
     )
     return f"recording session {session.id} ({mode}) -> {session.target}\n{hint}"
+
+
+@mcp.tool()
+def import_har(path: str) -> str:
+    """Infer an API from a HAR file exported from browser DevTools.
+
+    No capture, no proxy, no certificate — use this when the user can hand you a
+    .har, or when they have already reproduced the flow in their own browser.
+    The result is an ordinary session: describe, call and export it as usual.
+    """
+    session = sessions.ingest(Path(path).expanduser())
+    api = session.api()
+    listing = "\n".join(endpoint.summary() for endpoint in api.endpoints[:40])
+    return f"session {session.id}: {len(api.endpoints)} endpoints from {path}\n{listing}"
 
 
 @mcp.tool()

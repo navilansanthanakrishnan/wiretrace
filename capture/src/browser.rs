@@ -29,8 +29,8 @@ const ATTRIBUTION_WINDOW: f64 = 5.0;
 /// Reports UI actions to the binding installed by `Runtime.addBinding`.
 const PAGE_SCRIPT: &str = r#"
 (() => {
-  if (window.__reqtrace) return;
-  window.__reqtrace = true;
+  if (window.__wiretrace) return;
+  window.__wiretrace = true;
   const describe = (node) => {
     if (!(node instanceof Element)) return "unknown";
     const label = node.getAttribute("aria-label") || node.getAttribute("name") ||
@@ -38,7 +38,7 @@ const PAGE_SCRIPT: &str = r#"
     const role = node.getAttribute("role");
     return node.tagName.toLowerCase() + (role ? `[role=${role}]` : "") + (label ? ` "${label}"` : "");
   };
-  const emit = (kind) => (e) => __reqtraceEvent(JSON.stringify({ kind, label: describe(e.target) }));
+  const emit = (kind) => (e) => __wiretraceEvent(JSON.stringify({ kind, label: describe(e.target) }));
   document.addEventListener("click", emit("click"), true);
   document.addEventListener("submit", emit("submit"), true);
   document.addEventListener("keydown", (e) => {
@@ -57,7 +57,7 @@ pub async fn run(open: &str, profile: &Path, chrome: Option<PathBuf>, port: u16,
     for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
         cdp.call(method, json!({})).await?;
     }
-    cdp.call("Runtime.addBinding", json!({"name": "__reqtraceEvent"})).await?;
+    cdp.call("Runtime.addBinding", json!({"name": "__wiretraceEvent"})).await?;
     cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({"source": PAGE_SCRIPT})).await?;
     cdp.call("Page.navigate", json!({"url": open})).await?;
     eprintln!("browser capture attached to {open}");

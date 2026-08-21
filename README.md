@@ -1,8 +1,8 @@
-# reqtrace
+# wiretrace
 
 Watch an application, learn its API, hand it to an agent.
 
-reqtrace observes the HTTP traffic a real app makes while it is used, works out
+wiretrace observes the HTTP traffic a real app makes while it is used, works out
 what API is behind that traffic, and turns the result into something callable —
 an OpenAPI document, live replay, or a standalone MCP server. No documentation,
 no reverse engineering, no scraping. Just use the app, then stop.
@@ -14,37 +14,69 @@ no reverse engineering, no scraping. Just use the app, then stop.
                             lines         + auth         call it live
 ```
 
+## Two ways in
+
+Already have a HAR from your browser's DevTools? Skip the capture entirely —
+no proxy, no certificate, nothing installed in your keychain:
+
+```bash
+wiretrace import ~/Downloads/app.har
+wiretrace export ./app-api
+```
+
+Otherwise let wiretrace do the capturing.
+
 ## The loop
 
 ```bash
-reqtrace start https://hn.algolia.com/?query=rust   # a Chrome opens
+wiretrace start https://hn.algolia.com/?query=rust   # a Chrome opens
 #   ... click around ...
-reqtrace stop
+wiretrace stop
 # s1787284229: 35 requests -> 7 endpoints
 # post_indexes_item_dev_query: POST https://uj5wyc0l7x-dsn.algolia.net/1/indexes/Item_dev/query (1x)
 
-reqtrace show post_indexes_item_dev_query           # params, body schema, auth
-reqtrace call post_indexes_item_dev_query --body '{"query":"zig comptime"}'
-reqtrace export ./hn-api                            # openapi.json + a runnable MCP server
+wiretrace show post_indexes_item_dev_query           # params, body schema, auth
+wiretrace call post_indexes_item_dev_query --body '{"query":"zig comptime"}'
+wiretrace export ./hn-api                            # openapi.json + a runnable MCP server
 ```
 
-An agent does the same thing through the `reqtrace` MCP server. Same operations,
+An agent does the same thing through the `wiretrace` MCP server. Same operations,
 same session directory, different names:
 
 | CLI | MCP tool |
 |---|---|
-| `reqtrace start` | `start_capture` |
-| `reqtrace stop` | `stop_capture` |
-| `reqtrace show` | `list_endpoints` / `describe_endpoint` |
-| `reqtrace call` | `call_endpoint` |
-| `reqtrace export` | `export_mcp` |
-| `reqtrace sessions` / `reqtrace rm` | `list_sessions` / `forget_session` |
-| `reqtrace ca` | `ca_path` |
+| `wiretrace start` | `start_capture` |
+| `wiretrace stop` | `stop_capture` |
+| `wiretrace show` | `list_endpoints` / `describe_endpoint` |
+| `wiretrace call` | `call_endpoint` |
+| `wiretrace export` | `export_mcp` |
+| `wiretrace sessions` / `wiretrace rm` | `list_sessions` / `forget_session` |
+| `wiretrace ca` | `ca_path` |
 
-reqtrace only watches. Clicking, typing and navigating are a separate job, done
+wiretrace only watches. Clicking, typing and navigating are a separate job, done
 by [open-computer-use](https://github.com/NavilanSanthanakrishnan/open-computer-use)
-and its `computer-use` skill. Keeping the two apart is why reqtrace has no idea
+and its `computer-use` skill. Keeping the two apart is why wiretrace has no idea
 what a button is: it sees requests, nothing else.
+
+## How it compares
+
+The closest tool is [mitmproxy2swagger](https://github.com/alufers/mitmproxy2swagger),
+which turns a mitmproxy or HAR capture into an OpenAPI document. wiretrace reads
+the same HAR files, so anything you can do there you can do here.
+
+| | mitmproxy2swagger | wiretrace |
+|---|---|---|
+| HAR input | yes | yes |
+| Captures traffic itself | no — run mitmproxy separately | yes, proxy or browser |
+| Workflow | two passes, editing `ignore:` lines in YAML by hand | one command |
+| Output | OpenAPI | OpenAPI, plus a runnable MCP server |
+| Call an endpoint back | no | yes, with the captured session |
+| Credentials | warns they may end up in the schema | moved to a 0600 store, kept out of the schema |
+| Which click caused which request | — | recorded in browser captures |
+
+The difference in intent: mitmproxy2swagger documents an API, wiretrace makes one
+usable. If you want a spec to read, either will do. If you want something an
+agent can call, you need the credential handling and the replay path.
 
 ## How it is built
 
@@ -54,7 +86,7 @@ meaning.**
 | | |
 |---|---|
 | `capture/` (Rust, ~600 lines) | Everything that has to touch TLS, sockets and a browser. Emits one JSON line per HTTP exchange on stdout and nothing else. |
-| `reqtrace/` (Python, ~700 lines) | Everything that has to be understood, changed and extended: inference, replay, code generation, the agent surface. |
+| `wiretrace/` (Python, ~700 lines) | Everything that has to be understood, changed and extended: inference, replay, code generation, the agent surface. |
 
 The whole contract between them is one JSON object per line
 (`capture/src/event.rs`). That is why the Rust side has no config, no server, no
@@ -116,53 +148,53 @@ Needs macOS, a Rust toolchain, Python 3.11+, and Google Chrome for browser
 captures. [uv](https://docs.astral.sh/uv/) is used below but a plain venv works.
 
 ```bash
-git clone https://github.com/NavilanSanthanakrishnan/reqtrace
-cd reqtrace
+git clone https://github.com/NavilanSanthanakrishnan/wiretrace
+cd wiretrace
 cargo build --release --manifest-path capture/Cargo.toml
 uv venv && uv pip install -e .
 source .venv/bin/activate
-reqtrace --help
+wiretrace --help
 ```
 
-Set `REQTRACE_HOME` to move everything reqtrace stores (sessions, the CA,
-browser profiles) somewhere other than `~/.reqtrace`.
+Set `WIRETRACE_HOME` to move everything wiretrace stores (sessions, the CA,
+browser profiles) somewhere other than `~/.wiretrace`.
 
-To give an agent the tools, register `reqtrace-mcp` with any MCP client. It
+To give an agent the tools, register `wiretrace-mcp` with any MCP client. It
 speaks stdio:
 
 ```json
-{"mcpServers": {"reqtrace": {"command": "reqtrace-mcp"}}}
+{"mcpServers": {"wiretrace": {"command": "wiretrace-mcp"}}}
 ```
 
 For native apps there are two ways to make the proxy's certificate acceptable.
 Trust it system-wide once, which prompts for your password:
 
 ```bash
-reqtrace trust
+wiretrace trust
 ```
 
 Or leave the keychain alone and point individual clients at the certificate —
-`reqtrace ca` prints its path, creating it if needed:
+`wiretrace ca` prints its path, creating it if needed:
 
 ```bash
-curl -x http://127.0.0.1:8787 --cacert "$(reqtrace ca)" https://api.github.com/repositories/1300192
+curl -x http://127.0.0.1:8787 --cacert "$(wiretrace ca)" https://api.github.com/repositories/1300192
 ```
 
 ## Native apps
 
 ```bash
-reqtrace start discord.com --mode proxy   # points the macOS system proxy here
+wiretrace start discord.com --mode proxy   # points the macOS system proxy here
 #   ... use Discord ...
-reqtrace stop
+wiretrace stop
 ```
 
 `--no-system-proxy` leaves your network settings alone and expects you to route
 traffic yourself:
 
 ```bash
-reqtrace start api.github.com --mode proxy --no-system-proxy
-curl -x http://127.0.0.1:8787 --cacert "$(reqtrace ca)" https://api.github.com/search/repositories?q=rust
-reqtrace stop
+wiretrace start api.github.com --mode proxy --no-system-proxy
+curl -x http://127.0.0.1:8787 --cacert "$(wiretrace ca)" https://api.github.com/search/repositories?q=rust
+wiretrace stop
 ```
 
 That is the unattended path, and how the test suite drives a capture. `start`
@@ -176,7 +208,7 @@ against the first host.
 
 ## On disk
 
-`~/.reqtrace/sessions/<id>/`
+`~/.wiretrace/sessions/<id>/`
 
 ```
 session.json       what was captured and how
@@ -188,7 +220,7 @@ capture.log        the capture binary's stderr, when something is wrong
 
 The session directory is 0700 and the raw capture is 0600, because
 `events.jsonl` is the least redacted thing here — full cookies, full tokens, and
-the bodies of logged-in pages. `reqtrace rm <id>` deletes a capture and its
+the bodies of logged-in pages. `wiretrace rm <id>` deletes a capture and its
 browser profile; they hold real credentials, so do not let them pile up.
 
 ## Limits

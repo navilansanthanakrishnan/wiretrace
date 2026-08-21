@@ -1,10 +1,10 @@
 [package]
-name = "reqtrace-capture"
+name = "wiretrace-capture"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "reqtrace-capture"
+name = "wiretrace-capture"
 path = "src/main.rs"
 
 [dependencies]

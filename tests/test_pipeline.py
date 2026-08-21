@@ -15,12 +15,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-os.environ["REQTRACE_HOME"] = tempfile.mkdtemp(prefix="reqtrace-test-")
+os.environ["WIRETRACE_HOME"] = tempfile.mkdtemp(prefix="wiretrace-test-")
 
-from reqtrace import session as sessions  # noqa: E402
-from reqtrace.api import infer, looks_like_id, templatize  # noqa: E402
-from reqtrace.events import Exchange  # noqa: E402
-from reqtrace.export import export, openapi  # noqa: E402
+from wiretrace import session as sessions  # noqa: E402
+from wiretrace.api import infer, looks_like_id, templatize  # noqa: E402
+from wiretrace.events import Exchange  # noqa: E402
+from wiretrace.export import export, openapi  # noqa: E402
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -148,6 +148,42 @@ def test_secrets_never_reach_the_api_description():
     assert endpoint.query_params == {"api_key": "<captured>", "city": "berlin"}
     # Non-secret client headers are kept, because private APIs often demand them.
     assert endpoint.headers == {"user-agent": "curl/8"}
+
+
+def test_har_import_matches_a_live_capture(tmp_path):
+    """A HAR is the zero-setup path in, so it must infer the same API a capture would."""
+    har = {"log": {"entries": [
+        {"startedDateTime": "2026-08-20T10:00:00.000Z", "time": 12,
+         "request": {"method": "POST", "url": "https://x.com/api/channels/84121299/messages",
+                     "headers": [{"name": "Authorization", "value": "Bearer SEKRIT"},
+                                 {"name": "User-Agent", "value": "Firefox"}],
+                     "postData": {"text": '{"content": "hi"}'}},
+         "response": {"status": 200, "headers": [{"name": "Content-Type", "value": "application/json"}],
+                      "content": {"text": '{"id": "1", "ok": true}'}}},
+        {"startedDateTime": "2026-08-20T10:00:01.000Z", "time": 9,
+         "request": {"method": "POST", "url": "https://x.com/api/channels/84121300/messages",
+                     "headers": [{"name": "Authorization", "value": "Bearer SEKRIT"}],
+                     "postData": {"text": '{"content": "there"}'}},
+         "response": {"status": 200, "headers": [{"name": "Content-Type", "value": "application/json"}],
+                      "content": {"text": '{"id": "2", "ok": true}'}}},
+    ]}}
+    path = tmp_path / "capture.har"
+    path.write_text(json.dumps(har))
+
+    session = sessions.ingest(path)
+    api = session.api()
+
+    assert len(api.endpoints) == 1
+    endpoint = api.endpoints[0]
+    assert endpoint.method == "POST"
+    assert endpoint.path == "/api/channels/{channel_id}/messages"
+    assert endpoint.calls == 2
+    assert endpoint.body_schema["properties"]["content"] == {"type": "string"}
+    assert endpoint.headers == {"user-agent": "Firefox"}
+    # The same credential rule applies to imported traffic as to captured traffic.
+    assert endpoint.auth == ["authorization"]
+    assert "SEKRIT" not in json.dumps(api.to_dict())
+    assert json.loads((session.dir / "credentials.json").read_text())["x.com"]["authorization"]
 
 
 def test_is_api_skips_page_furniture():

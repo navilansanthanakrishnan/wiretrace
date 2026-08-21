@@ -2,7 +2,7 @@
 //!
 //! One CA is generated per install and stored as PEM. Leaf certificates are
 //! issued per host and cached. macOS trust installation lives in Python
-//! (`reqtrace/system.py`) — it is just a `security` invocation.
+//! (`wiretrace/system.py`) — it is just a `security` invocation.
 
 use std::collections::HashMap;
 use std::fs;
@@ -22,7 +22,7 @@ use hudsucker::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8Ke
 use hudsucker::rustls::ServerConfig;
 use tokio::sync::Mutex;
 
-pub const COMMON_NAME: &str = "reqtrace local CA";
+pub const COMMON_NAME: &str = "wiretrace local CA";
 
 /// rcgen's defaults run from 1975 to 4096. A certificate valid for two millennia
 /// is a red flag on sight and invites future policy to reject it, so both the CA
