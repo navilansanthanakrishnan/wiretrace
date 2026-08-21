@@ -41,11 +41,10 @@ same session directory, different names:
 | `reqtrace sessions` / `reqtrace rm` | `list_sessions` / `forget_session` |
 | `reqtrace ca` | `ca_path` |
 
-reqtrace only watches. Clicking, typing and navigating are
-[open-computer-use](https://github.com/NavilanSanthanakrishnan/open-computer-use)'s
-job — it is linked at `open-computer-use/` here, and its `computer-use` skill is
-what an agent should drive the app with. Keeping the two apart is why reqtrace
-has no idea what a button is: it sees requests, nothing else.
+reqtrace only watches. Clicking, typing and navigating are a separate job, done
+by [open-computer-use](https://github.com/NavilanSanthanakrishnan/open-computer-use)
+and its `computer-use` skill. Keeping the two apart is why reqtrace has no idea
+what a button is: it sees requests, nothing else.
 
 ## How it is built
 
@@ -113,13 +112,24 @@ URLs, and example bodies alike. Replay attaches the real values.
 
 ## Install
 
+Needs macOS, a Rust toolchain, Python 3.11+, and Google Chrome for browser
+captures. [uv](https://docs.astral.sh/uv/) is used below but a plain venv works.
+
 ```bash
+git clone https://github.com/NavilanSanthanakrishnan/reqtrace
+cd reqtrace
 cargo build --release --manifest-path capture/Cargo.toml
 uv venv && uv pip install -e .
+source .venv/bin/activate
+reqtrace --help
 ```
 
 Set `REQTRACE_HOME` to move everything reqtrace stores (sessions, the CA,
 browser profiles) somewhere other than `~/.reqtrace`.
+
+To give an agent the tools, register the MCP server. In Claude Code the bundled
+`.mcp.json` does it for you when you open the repo; anywhere else, run
+`reqtrace-mcp` over stdio.
 
 For native apps there are two ways to make the proxy's certificate acceptable.
 Trust it system-wide once, which prompts for your password:
@@ -196,6 +206,10 @@ These are real, not temporary caveats hiding a bug:
 - `browser` mode is Chromium only.
 - Inference describes what was *observed*. An endpoint's optional fields are
   invisible until something sends them.
+
+## License
+
+MIT. See `LICENSE`.
 
 ## Tests
 
